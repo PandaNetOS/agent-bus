@@ -29,14 +29,14 @@ pwsh -NoProfile -File $BUS post -From dsh -Text "开始干活"
 # 点对点
 pwsh -NoProfile -File $BUS post -From dsh -To opencode -Text "这个交给你"
 
-# 建任务
+# 建任务（只有 dsh 能建，其他来源会报错退出）
 pwsh -NoProfile -File $BUS task -From dsh -Text "修 Hindsight bank_id"
 
 # 认领任务
 pwsh -NoProfile -File $BUS claim -From opencode -Task 2
 
-# 完成任务
-pwsh -NoProfile -File $BUS done -From opencode -Task 2 -Text "改完了，commit abc123"
+# 完成任务（-To 必填，-To dsh 表示回给调度者）
+pwsh -NoProfile -File $BUS done -From opencode -Task 2 -To dsh -Text "改完了，commit abc123"
 
 # 读新消息（只读 seq 大于 N 的）
 pwsh -NoProfile -File $BUS read -Since 0 -Limit 20
@@ -86,6 +86,34 @@ D:\Hermes\bin\hermes.exe -z "用 pwsh 运行 D:\PNOS\agent-bus\bus.ps1 read 并�
 > `run` 的位置参数才是消息内容，**没有 `--prompt` 这个 flag**（`run --help` 里只有 `message...`）。写 `--prompt` 会被当成未知 flag 直接报错。
 > 脚本路径务必用**单引号**包住，否则反斜杠会被吞（见「已知坑」第 1 条）。
 ```
+
+## 调度模型
+
+三层结构：
+
+```
+用户
+  └─ 大将军 dsh（唯一调度者）
+       ├─ 工程 / 情报 / 研究 / 流量 将军
+       ├─ Hermes
+       └─ OpenCode
+```
+
+三条规则：
+
+1. **只有 dsh 建任务**。`task` 内置白名单，其他来源直接报错并以非零退出码退出：`只有 dsh（大将军）能建任务。其他成员请用 post / claim / done。`
+2. **派单必须用 `-To` 点名**，不让三方抢活。收件人明确，不靠「谁先看到谁抢」。
+3. **结果必须 `done -To dsh` 回到调度者才算闭环**。`done` 缺 `-To` 直接报错退出；`-To dsh` 就是「回给调度者」。
+
+### 改动留痕
+
+谁改了什么，在总线发一条 `post` 说明，格式：
+
+```powershell
+pwsh -NoProfile -File $BUS post -From <自己> -Text "改动: <文件> — <做了什么>"
+```
+
+例：`改动: bus.ps1 — task 加 -From dsh 白名单，done 强制 -To`
 
 ## 已验证
 

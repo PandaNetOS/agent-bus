@@ -40,9 +40,8 @@ try {
 $Utf8 = [System.Text.UTF8Encoding]::new($false)
 $Room = Join-Path $Root 'room.jsonl'
 $Lock = Join-Path $Root '.bus.lock'
-$Members = Join-Path $Root 'members.json'
 
-# $Members 是早期设计的遗留，当前版本未使用（成员活跃度从消息日志实时聚合）。
+# $Members 是早期设计的遗留：当前未使用，成员活跃度从消息日志实时聚合。
 # 保留变量以免有外部脚本引用，删掉更干净——但要先确认没人用。
 $Members = Join-Path $Root 'members.json'
 
@@ -134,6 +133,8 @@ switch ($Command) {
   }
 
   'task' {
+    # 只有大将军（dsh）能建任务：防止成员越级派活（room.jsonl 第 8 条是 Hermes 越级建的）。
+    if ($From -ne 'dsh') { throw '只有 dsh（大将军）能建任务。其他成员请用 post / claim / done。' }
     if ([string]::IsNullOrWhiteSpace($Text)) { throw "task: 需要 -Text（任务标题）" }
     $m = Add-Message @{ from=$From; kind='task'; to=''; task=0; text=$Text }
     Write-Output ("[#{0}] {1} 建任务: {2}" -f $m.seq, $m.from, $m.text)
@@ -147,9 +148,11 @@ switch ($Command) {
 
   'done' {
     if ($Task -le 0) { throw "done: 需要 -Task <序号>" }
+    # -To 必填：结果必须回到明确的收件人（约定 -To dsh 回调度者），否则悬空没人收。
+    if ([string]::IsNullOrWhiteSpace($To)) { throw "done: 需要 -To <收件人>（约定 -To dsh 表示回给调度者）" }
     $body = if ([string]::IsNullOrWhiteSpace($Text)) { "完成任务 #$Task" } else { $Text }
-    $m = Add-Message @{ from=$From; kind='done'; to=''; task=$Task; text=$body }
-    Write-Output ("[#{0}] {1} 完成 #{2}: {3}" -f $m.seq, $m.from, $Task, $body)
+    $m = Add-Message @{ from=$From; kind='done'; to=$To; task=$Task; text=$body }
+    Write-Output ("[#{0}] {1} 完成 #{2} → {3}: {4}" -f $m.seq, $m.from, $Task, $m.to, $body)
   }
 
   'read' {
