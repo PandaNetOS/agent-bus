@@ -1,6 +1,7 @@
 # 运行时数据：消息日志不进仓库
 room.jsonl
 .bus.lock
+.bus-dropped.jsonl
 ceo.txt
 hub-config.json
 

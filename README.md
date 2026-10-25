@@ -45,9 +45,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File stop.ps1
 | `drivers/opencode.mjs` | OpenCode 入口（`opencode-cli.exe acp`） |
 | `webui/busd.mjs` | 工作台后端（只读 + 人工发言 + 配置） |
 | `webui/index.html` | 单文件前端，无构建 |
-| `tools/accept.mjs` | 验收脚本 |
+| `tools/accept.mjs` | 验收脚本（26 项） |
 | `tools/say.mjs` | 命令行发消息（中文安全，见已知坑 7） |
 | `tools/probe.mjs` | 单独探一个 agent 的 ACP 通道 |
+| `tools/stress.mjs` | 写压测：10 进程 × 30 条，验不丢不重（见下） |
 
 运行时文件（都不进 git）：`room.jsonl`、`ceo.txt`、`hub-config.json`、`.cursor-<agent>.json`、`.heartbeat-<agent>.json`、`stream-<agent>.jsonl`、`.pid-*`。
 
@@ -58,6 +59,9 @@ $BUS = 'D:\PNOS\agent-bus\bus.ps1'
 
 # 发消息
 pwsh -NoProfile -File $BUS post -From dsh -Text "开始干活"
+
+# 幂等重试：自带 seq，重复投递只落一条（其余丢弃并告警，退出码仍是 0）
+pwsh -NoProfile -File $BUS post -From dsh -Seq 57 -Text "重试三次也只写一条"
 
 # 点对点 + v2 字段
 pwsh -NoProfile -File $BUS post -From hermes -To opencode -Mentions opencode `
@@ -104,6 +108,38 @@ v2 新增五个字段，全部可选，旧调用不受影响：
 `mentions` 存字符串不存数组：PS 5.1 的 `ConvertTo-Json` 会把单元素数组退化成裸字符串，解析方类型不稳定。
 
 `seq` 单调递增、全局唯一，是轮询游标。`-Task` 指向建任务那条消息的 `seq`（不是任务序号）。
+
+### seq 幂等写入
+
+`post / task / claim / done` 都可以带 `-Seq N`（`N > 0`），语义是「我就要这一条落在 #N」：
+
+| 情况 | 行为 |
+|---|---|
+| `#N` 已存在 | **丢弃**并告警（`duplicate`），退出码 0 |
+| `#N` 已被别人越过（日志有空洞） | **丢弃**并告警（`stale`），退出码 0 |
+| `#N` 跳空（> 当前最大 +1） | **报错**不写，退出码 1 |
+| 不带 `-Seq`（默认 0） | 锁内分配 `max+1`，和以前一样 |
+
+幂等丢弃算成功：重试方要的就是「这条消息在日志里」，重复投递不该报错。
+
+告警走三路，谁都能拿到：`Write-Warning`（人看）、stderr（进程调用方捕获）、
+`.bus-dropped.jsonl`（事后审计，字段 `ts/seq/reason/from/text/kept_from`）。
+
+用法是重试安全的基本盘：调用方先拿一次响应里的 seq，网络中断/超时后带着同一个
+seq 重投，不会写两条。
+
+```powershell
+pwsh -File $BUS post -From dsh -Seq 57 -Text "重试三次也只写一条"
+```
+
+### NTFS 独占创建锁
+
+`.bus.lock` 用 `FileMode::CreateNew` + `FileShare::None`：NTFS 保证「不存在才创建」是原子的，
+同一瞬间只有一个进程能建出来，其余拿 `IOException` 后重试（10–30ms 抖动，避免同频对撞）。
+
+锁文件里写持有者信息 `{pid, token, host, since}`：一是超时排查时能看出是谁卡住，
+二是进程被 kill 时残留的锁能被自愈。自愈条件是 **mtime > 120 秒 且 pid 已死**——
+只看时间会把一次合法的慢写入误判成死锁。释放时校验 `token`，只删自己那把锁。
 
 ## WebUI
 
@@ -162,11 +198,34 @@ POST /api/cancel           {agent}
 ```powershell
 node tools/accept.mjs          # 26 项，几秒，不需要 LLM
 node tools/accept.mjs --live   # 加上真 agent 的 A→B→A 双向对话，要几分钟
+node tools/stress.mjs          # 写压测：10 进程 × 30 条，约 20 秒
 ```
 
 覆盖的是失败路径，不是 happy path：六道闸逐条、熔断计数、PS 与 Node 混写并发、游标重放、首次启动基线、增量读截断、driver 不依赖 busd。
 
 2026-10-25 实测：26/26 通过。真链路实测链：`human→hermes(hop1)→opencode(hop2)→hermes(hop3)→opencode 被 hop-limit 拦住`。
+
+### 写压测
+
+```powershell
+node tools/stress.mjs --procs 10 --per 30     # 默认，约 20 秒（每条一次进程启动 ≈ 55ms）
+node tools/stress.mjs --procs 10 --per 30 --root D:\test\x
+$env:BUS_POWERSHELL='pwsh.exe'; node tools/stress.mjs   # 换 pwsh 7 跑一遍
+```
+
+每个 worker 是一个真正的 `powershell.exe` 进程，进程内循环写 30 条——既有跨进程
+并发，又不用付 300 次进程启动的钱。压测用独立 runtime（`D:\test\bus-stress`），不碰生产日志。
+
+2026-10-25 实测：32/32 通过，PowerShell 5.1 与 pwsh 7 各跑一遍。
+
+| 项 | 验的是什么 |
+|---|---|
+| 1. 自动 seq 并发 | 300 条一条不少、一条不多，seq 1..300 连续唯一，无坏行（无撕裂写），每个进程恰好 30 条 |
+| 2. 幂等 seq 并发 | 10 个进程抢同一个 seq：只落 1 条，其余 29 次全丢弃并记账，告警可见 |
+| 3. 跳空 | `-Seq` 跳空被拒（退出码 1）、日志不变；`max+1` 显式 seq 正常写 |
+| 4. 日志空洞 | 洞里的 seq → 丢弃告警，不写进去 |
+| 5. 残留锁自愈 | 持有者已死的 `.bus.lock` 让后来者几百毫秒内拿到锁，不是干等 10 秒超时 |
+| 5b. 活着的持有者 | 反方向：mtime 很旧但 pid 还活着 = 只是慢，必须老实等超时，绝不抢锁 |
 
 ## 已知坑
 
@@ -181,6 +240,9 @@ node tools/accept.mjs --live   # 加上真 agent 的 A→B→A 双向对话，�
 9. **`$hop` / `$via` 不能当局部变量名**：PowerShell 大小写不敏感，会撞上 `param` 里的 `[int]$Hop`，给 int 赋字符串直接抛类型转换错误。用 `$hopTag`。
 10. **后台启动别用 bash 的 `&`**：`node ... &` 在这台机器上会因 `stdin is not a tty` 直接死掉。用 `start.ps1`（内部是 `Start-Process`）。
 11. **没指定 CEO 就谁都建不了任务**：`ceo.txt` 不存在或为空时 `task` 一律报错退出。这是故意的。
+12. **`.bus.lock` 残留会让所有人卡 10 秒**：正常退出一定会删锁，但进程被强杀会留下。
+    老版本的判据只看时间，会把一次慢写入误判成死锁——现在改成「mtime > 120 秒 **且** pid 已死」
+    才清。确认没有写入进行中时直接删 `.bus.lock` 最快。
 
 ## 调度模型
 
