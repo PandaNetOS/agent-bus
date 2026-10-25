@@ -40,6 +40,7 @@ try {
 $Utf8 = [System.Text.UTF8Encoding]::new($false)
 $Room = Join-Path $Root 'room.jsonl'
 $Lock = Join-Path $Root '.bus.lock'
+$CeoFile = Join-Path $Root 'ceo.txt'
 
 # $Members 是早期设计的遗留：当前未使用，成员活跃度从消息日志实时聚合。
 # 保留变量以免有外部脚本引用，删掉更干净——但要先确认没人用。
@@ -96,6 +97,15 @@ function Get-Messages {
   $script:Messages = $out.ToArray()
 }
 
+# ---------- 读 CEO ----------
+# CEO 由用户指定：runtime 目录下 ceo.txt，一行一个 agent 名。
+# 谁被指定为 CEO，谁才有派活（task）权限；dsh 也只是普通 agent。
+function Get-Ceo {
+  if (-not (Test-Path $CeoFile)) { return '' }
+  $raw = [System.IO.File]::ReadAllText($CeoFile, $Utf8)
+  return $raw.Trim()
+}
+
 # ---------- 追加一条 ----------
 function Add-Message {
   param([hashtable]$Fields)
@@ -133,8 +143,13 @@ switch ($Command) {
   }
 
   'task' {
-    # 只有大将军（dsh）能建任务：防止成员越级派活（room.jsonl 第 8 条是 Hermes 越级建的）。
-    if ($From -ne 'dsh') { throw '只有 dsh（大将军）能建任务。其他成员请用 post / claim / done。' }
+    # 派活权限只属于 CEO：CEO 由用户指定（ceo.txt 一行一个 agent 名）。
+    # dsh 也只是普通 agent，不再默认拥有派活权。
+    $ceo = Get-Ceo
+    if ([string]::IsNullOrWhiteSpace($ceo)) {
+      throw "task: 还没有指定 CEO。请用户在 $CeoFile 里写一行 CEO 的 agent 名（如 dsh）。"
+    }
+    if ($From -ne $ceo) { throw "只有 CEO（当前：$ceo）能建任务。其他成员请用 post / claim / done。" }
     if ([string]::IsNullOrWhiteSpace($Text)) { throw "task: 需要 -Text（任务标题）" }
     $m = Add-Message @{ from=$From; kind='task'; to=''; task=0; text=$Text }
     Write-Output ("[#{0}] {1} 建任务: {2}" -f $m.seq, $m.from, $m.text)
@@ -149,7 +164,7 @@ switch ($Command) {
   'done' {
     if ($Task -le 0) { throw "done: 需要 -Task <序号>" }
     # -To 必填：结果必须回到明确的收件人（约定 -To dsh 回调度者），否则悬空没人收。
-    if ([string]::IsNullOrWhiteSpace($To)) { throw "done: 需要 -To <收件人>（约定 -To dsh 表示回给调度者）" }
+    if ([string]::IsNullOrWhiteSpace($To)) { throw "done: 需要 -To <收件人>（回给派单人，通常就是 CEO）" }
     $body = if ([string]::IsNullOrWhiteSpace($Text)) { "完成任务 #$Task" } else { $Text }
     $m = Add-Message @{ from=$From; kind='done'; to=$To; task=$Task; text=$body }
     Write-Output ("[#{0}] {1} 完成 #{2} → {3}: {4}" -f $m.seq, $m.from, $Task, $m.to, $body)
@@ -184,6 +199,12 @@ switch ($Command) {
   'who' {
     Get-Messages
     $all = @($script:Messages)
+    $ceo = Get-Ceo
+    if ([string]::IsNullOrWhiteSpace($ceo)) {
+      Write-Output "=== CEO: 未指定（当前没人能建任务）==="
+    } else {
+      Write-Output "=== CEO: $ceo（由用户指定）==="
+    }
     if (-not $all) { Write-Output "(还没有任何成员发言)"; break }
     Write-Output "=== 成员活跃度 ==="
     $all | Group-Object from | Sort-Object Count -Descending | ForEach-Object {

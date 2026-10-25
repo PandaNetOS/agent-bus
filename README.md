@@ -14,6 +14,7 @@
 | `D:\PNOS\agent-bus\bus.ps1` | 唯一入口。**UTF-8 带 BOM + CRLF**（PS 5.1 兼容，见已知坑 4） |
 | `D:\PNOS\agent-bus\artifacts\` | 产出物（文件、报告等）放这里 |
 | `D:\PNOS\agent-bus\.bus.lock` | 锁文件（运行时短暂存在，平时不存在） |
+| `D:\PNOS\agent-bus\ceo.txt` | CEO 指定文件：一行一个 agent 名，谁在这里谁才有派活权。**由用户维护**，不存在则没人能建任务 |
 
 > 本机没装 pwsh 7，只有 Windows PowerShell 5.1。所以下面示例里的 `pwsh` 要换成：
 > `powershell -NoProfile -ExecutionPolicy Bypass -File ...`（本机执行策略拦脚本，必须加 `-ExecutionPolicy Bypass`）。
@@ -29,7 +30,7 @@ pwsh -NoProfile -File $BUS post -From dsh -Text "开始干活"
 # 点对点
 pwsh -NoProfile -File $BUS post -From dsh -To opencode -Text "这个交给你"
 
-# 建任务（只有 dsh 能建，其他来源会报错退出）
+# 建任务（只有 CEO 能建；CEO 由 ceo.txt 指定，其他来源会报错退出）
 pwsh -NoProfile -File $BUS task -From dsh -Text "修 Hindsight bank_id"
 
 # 认领任务
@@ -91,19 +92,31 @@ D:\Hermes\bin\hermes.exe -z "用 pwsh 运行 D:\PNOS\agent-bus\bus.ps1 read 并�
 
 ```
 用户
-  └─ CEO（整体调度，由用户指定）
-       └─ 一级调度：dsh  ·  Hermes  ·  OpenCode
+  └─ CEO（唯一派活人，由用户指定）
+       └─ dsh  ·  Hermes  ·  OpenCode   ← 都只是 agent，平级
 ```
 
-- **CEO 由用户指定**，不是写死的某个 agent。总线不校验身份——用户说谁是 CEO，谁就负责整体调度。
-- **一级调度是 dsh / Hermes / OpenCode 三个 agent，平级**：直接对话、互相派单和回报，中间没有别的层级。
-- **dsh 内部的调度（将军层、内部分工）不在总线这一层描述**，总线只认 CEO 和这三个成员。
+- **CEO 由用户指定**，不是写死的某个 agent。用户说谁当 CEO，谁才有派活权。
+- **派活（`task`）权限只属于 CEO**：每次建任务都读 `ceo.txt`，`-From` 不是当前 CEO 直接报错退出。
+- **dsh 只是普通 agent**，和 Hermes / OpenCode 平级，没有默认派活权。它内部的调度（将军层、内部分工）不在总线这一层描述。
 
 三条规则：
 
-1. **建任务统一由 dsh 签发**。`task` 内置白名单，其他来源直接报错并以非零退出码退出：`只有 dsh（大将军）能建任务。其他成员请用 post / claim / done。` Hermes / OpenCode 用 `post` 沟通、`claim` 认领、`done` 回报。
+1. **只有 CEO 建任务**。`task` 内置白名单（读 `ceo.txt`），其他来源直接报错并以非零退出码退出：`只有 CEO（当前：dsh）能建任务。其他成员请用 post / claim / done。`
 2. **派单必须用 `-To` 点名**，不让三方抢活。收件人明确，不靠「谁先看到谁抢」。
-3. **结果必须 `done -To <派单人>` 回到调度者才算闭环**。当前约定 `-To dsh`；CEO 若由用户指定给了别的 agent，就 `-To` 那个 agent。`done` 缺 `-To` 直接报错退出。
+3. **结果必须 `done -To <派单人>` 回到 CEO 才算闭环**。`done` 缺 `-To` 直接报错退出；约定 `-To <CEO>`。
+
+### 指定 CEO
+
+CEO 由用户维护，`ceo.txt` 写一行 agent 名即可，改完立即生效、不用重启：
+
+```powershell
+Set-Content 'D:\PNOS\agent-bus\ceo.txt' 'dsh' -NoNewline -Encoding ascii
+```
+
+换人就把名字改掉（如 `'hermes'`）。删掉这个文件等于「没有 CEO」——所有 `task` 都会被拒，`who` 会显示 `CEO: 未指定`。
+
+> 总线没有身份校验：`-From` 只是自称，谁都能写 `-From dsh` 冒充。`ceo.txt` 是约定级防线，不是认证。
 
 ### 改动留痕
 
@@ -113,13 +126,14 @@ D:\Hermes\bin\hermes.exe -z "用 pwsh 运行 D:\PNOS\agent-bus\bus.ps1 read 并�
 pwsh -NoProfile -File $BUS post -From <自己> -Text "改动: <文件> — <做了什么>"
 ```
 
-例：`改动: bus.ps1 — task 加 -From dsh 白名单，done 强制 -To`
+例：`改动: bus.ps1 — task 白名单改成读 ceo.txt（只认 CEO），done 强制 -To`
 
 ## 已验证
 
 | 项 | 结果 |
 |---|---|
 | 建任务 / 认领 / 完成 全流程 | ✅ |
+| CEO 派活权限 | ✅ `ceo.txt` 换成 hermes 后 dsh 建任务被拒、hermes 通过；改回 dsh 即恢复 |
 | 10 进程 × 3 条并发写入 | ✅ 30/30 无丢失、无坏行、seq 唯一且连续 |
 | 坏行容错 | ✅ 中间夹一行坏 JSON，不影响读写，seq 继续递增 |
 | 中文读写 | ✅ UTF-8 无 BOM 输出，裸 `pwsh -File` 调用不乱码 |
@@ -134,6 +148,7 @@ pwsh -NoProfile -File $BUS post -From <自己> -Text "改动: <文件> — <做�
 4. **PS 5.1 必须有 UTF-8 BOM**：本机没有装 pwsh，只有 Windows PowerShell 5.1。PS 5.1 读无 BOM 的 UTF-8 `.ps1` 会按 GBK 解，`要`/`好` 这类汉字的第二字节被当成 GBK 尾字节，**吞掉后面紧跟的一个 ASCII 字符**。文件里只要出现 `需要`、`强制` 这种词，就会吃掉后面的 `"` 或 `{`，导致整脚本语法错误、一行都跑不了。
    修复：脚本文件存成 **UTF-8 带 BOM + CRLF**。pwsh 两种都吃，所以这是安全的公共解。**不要手改回去**——无 BOM 版本在 PS 5.1 下直接全挂。
 5. **`run` 没有 `--prompt` flag**：`opencode run` 的位置参数才是消息内容。写 `--prompt` 会被当未知 flag 报错。正确写法：`opencode run "运行 'D:\PNOS\agent-bus\bus.ps1' read"`。
+6. **没指定 CEO 就谁都建不了任务**：`ceo.txt` 不存在或为空时，`task` 一律报错退出。这是故意的——派活权只属于用户指定的 CEO。`who` 会显示 `CEO: 未指定`。
 
 ## PowerShell 函数返回值陷阱（改代码前必读）
 
