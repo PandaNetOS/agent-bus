@@ -50,7 +50,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File stop.ps1
 | `tools/probe.mjs` | 单独探一个 agent 的 ACP 通道 |
 | `tools/stress.mjs` | 写压测：10 进程 × 30 条，验不丢不重（见下） |
 
-运行时文件（都不进 git）：`room.jsonl`、`ceo.txt`、`hub-config.json`、`.cursor-<agent>.json`、`.heartbeat-<agent>.json`、`stream-<agent>.jsonl`、`.pid-*`。
+运行时文件（都不进 git）：`room.jsonl`、`ceo.txt`、`hub-config.json`、`.claims.jsonl`、`.cursor-<agent>.json`、`.heartbeat-<agent>.json`、`stream-<agent>.jsonl`、`.pid-*`。
 
 ## bus.ps1 命令
 
@@ -105,6 +105,8 @@ v2 新增五个字段，全部可选，旧调用不受影响：
 | `hop` | 自动对话跳数 | `0` |
 | `via` | `human` 或 `driver:<name>` | `human` |
 
+`to` 还可能是 `'*'`，表示群聊广播（`@全体`）——见上文「群聊语义」。
+
 `mentions` 存字符串不存数组：PS 5.1 的 `ConvertTo-Json` 会把单元素数组退化成裸字符串，解析方类型不稳定。
 
 `seq` 单调递增、全局唯一，是轮询游标。`-Task` 指向建任务那条消息的 `seq`（不是任务序号）。
@@ -146,7 +148,7 @@ pwsh -File $BUS post -From dsh -Seq 57 -Text "重试三次也只写一条"
 三栏：
 
 - **左**：成员卡（在线/思考中/熔断）、CEO 切换、自动对话总开关 + 最大跳数、任务看板、统计
-- **中**：消息流。`@名字` 定向点名；`hop>0` 显示 `↻N`；自动消息左侧紫条；hop 到顶的消息标黄并给「放行」按钮
+- **中**：**群聊**。气泡式，同人连发合并头像；`hop>0` 显示 `↻N`；自动消息深紫气泡；hop 到顶标黄并给「放行」按钮；有人思考时显示「正在输入…」
 - **右**：选中 agent 的实时流 —— 思考片段、工具调用、回复、token 用量。「中断本轮」发 `session/cancel`
 
 接口：
@@ -164,18 +166,47 @@ POST /api/ceo              {name}
 POST /api/cancel           {agent}
 ```
 
+## 群聊语义（不点名 = @全体）
+
+中栏输入框就是你跟群里 agent 聊天的通道：
+
+| 输入 | 发给谁 | 谁来答 |
+|---|---|---|
+| `大家看下这个` | `to='*'`（全体） | **谁先抢到谁回**，只回一条 |
+| `@hermes 看下锁` | `to='hermes'` | 只有 hermes |
+| `@opencode 你来` 出现在 agent 回复里 | 转交给 opencode | 只有 opencode |
+
+**「一人回复」是怎么保证的**：driver 在**投喂之前**先往 `.claims.jsonl` 原子抢答
+（和 `.bus.lock` 同一套 NTFS 独占创建）。先抢到的赢，另一个看到 `claimed` 直接跳过。
+
+为什么必须抢在投喂前：从投喂到写回要几十秒到几分钟（LLM 推理），这段时间里
+另一个 driver 轮询看到的日志还是「没人回过」，于是也去答 —— 等两边都写完，
+一条群消息冒出两条回复，群聊变刷屏、token 也翻倍。`.claims.jsonl` 建完不删，
+它同时是「谁答了这条」的审计记录。
+
+**为什么用 `to='*'` 哨兵，而不是「to 为空就算广播」**：v1 和 v2 早期的消息
+`to` 和 `mentions` 都是空的，靠空值推断会把历史里所有没点名的话追溯成广播——
+新装一个 driver、开关一开，它就把整个历史全答一遍。
+
+**回复不会写成 `*`**：否则回复自己又变成广播，被全体再答一遍，无限接力。
+回复要么 `@别人`（转交），要么回给发起人。
+
 ## driver 与六道闸
 
 一个 driver = 一个 agent 的耳朵和嘴：轮询日志 → 过六闸 → 投喂自己的 agent → 把回复写回。
 
 **六条全过才投喂**：
 
-1. `to == 我` 或 `mentions` 含我
+1. `to == 我` 或 `mentions` 含我（`to == '*'` 的群聊广播对所有人成立）
 2. `from != 我`
 3. `via == human` 或 `hop < maxHop`（默认 3）
 4. 该 seq 不在本 driver 游标里
 5. 未熔断（60 秒内自动消息 ≤ 12 条）
 6. 最近 20 条里同一 `(from,to,text 前 80 字)` 不超过 2 次
+
+群聊广播（`to == '*'`）额外过两道「一人回复」的闸，缺一不可：
+7. **未被抢答**（`.claims.jsonl` 里没有这个 seq）—— 见上文「群聊语义」
+8. **日志里还没有 `reply_to == 本条` 的回复**（抢答记录丢失时的兜底，也给看板用）
 
 回复时 `hop = 原 hop + 1`、`thread` 沿用、`reply_to = 原 seq`、`via = driver:<我>`。
 
@@ -196,14 +227,15 @@ POST /api/cancel           {agent}
 ## 验收
 
 ```powershell
-node tools/accept.mjs          # 26 项，几秒，不需要 LLM
+node tools/accept.mjs          # 49 项，几秒，不需要 LLM
 node tools/accept.mjs --live   # 加上真 agent 的 A→B→A 双向对话，要几分钟
 node tools/stress.mjs          # 写压测：10 进程 × 30 条，约 20 秒
 ```
 
-覆盖的是失败路径，不是 happy path：六道闸逐条、熔断计数、PS 与 Node 混写并发、游标重放、首次启动基线、增量读截断、driver 不依赖 busd。
+覆盖的是失败路径，不是 happy path：六道闸逐条、群聊广播与抢答原子性、
+熔断计数、PS 与 Node 混写并发、游标重放、首次启动基线、增量读截断、driver 不依赖 busd。
 
-2026-10-25 实测：26/26 通过。真链路实测链：`human→hermes(hop1)→opencode(hop2)→hermes(hop3)→opencode 被 hop-limit 拦住`。
+2026-10-25 实测：49/49 通过。真链路实测链：`human→hermes(hop1)→opencode(hop2)→hermes(hop3)→opencode 被 hop-limit 拦住`。
 
 ### 写压测
 

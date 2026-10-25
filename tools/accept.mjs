@@ -10,7 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -52,6 +52,82 @@ section('1. 六道闸');
 
   const dup = { ...base, via: 'driver:a', hop: 1 };
   ok('同样的话第 3 次 → 判循环', gates.gate(dup, { me: 'hermes', all: [dup, dup], config: cfg }).reason === 'loop');
+}
+
+// ---------------- 1b. 群聊广播（@全体，一人回复） ----------------
+section('1b. 群聊广播');
+{
+  const cfg = { autoChat: true, maxHop: 3, hopReset: {} };
+  const bcast = { seq: 20, from: 'human', to: '*', mentions: '*', text: '大家好', hop: 0, via: 'human', thread: 't-g' };
+
+  ok('广播：hermes 看得到', gates.gate(bcast, { me: 'hermes', all: [bcast], config: cfg }).ok);
+  ok('广播：opencode 也看得到', gates.gate(bcast, { me: 'opencode', all: [bcast], config: cfg }).ok);
+  ok('广播：dsh 也看得到', gates.gate(bcast, { me: 'dsh', all: [bcast], config: cfg }).ok);
+  ok('广播：自己发的仍不算', gates.gate({ ...bcast, from: 'hermes' }, { me: 'hermes', all: [], config: cfg }).reason === 'self');
+
+  // 已被抢答：磁盘上有抢答记录的 driver 必须跳过
+  const claimed = new Set([20]);
+  ok('已被抢答 → 不投喂', gates.gate(bcast, { me: 'hermes', all: [bcast], config: cfg, claimed }).reason === 'claimed');
+
+  // 兜底：日志里已有回复（抢答记录丢失/老消息时）
+  const answeredAll = [bcast, { seq: 21, from: 'opencode', to: 'human', reply_to: 20, via: 'driver:opencode', hop: 1 }];
+  ok('日志里已有人回 → 不投喂', gates.gate(bcast, { me: 'hermes', all: answeredAll, config: cfg }).reason === 'answered');
+
+  // 老消息（to 和 mentions 都为空）不能被追溯成广播 —— 那会让新装的 driver
+  // 把历史里所有没点名的话全答一遍
+  const legacy = { seq: 22, from: 'human', to: '', mentions: '', text: '老消息', via: 'human' };
+  ok('老的空收件人消息不算广播', gates.gate(legacy, { me: 'hermes', all: [legacy], config: cfg }).reason === 'not-named');
+  ok('isBroadcast 只认 * 哨兵', gates.isBroadcast(bcast) && !gates.isBroadcast(legacy));
+
+  // 点名消息不受「一人回复」限制：点名是明确的委托，回几次由 hop 管
+  const named = { seq: 23, from: 'human', to: 'hermes', mentions: 'hermes', text: 'hi', hop: 0, via: 'human', thread: 't-1' };
+  const claimedNamed = new Set([23]);
+  ok('点名消息不受抢答闸限制', gates.gate(named, { me: 'hermes', all: [named], config: cfg, claimed: claimedNamed }).ok);
+}
+
+// ---------------- 1c. 抢答原子性（两个 driver 抢同一条） ----------------
+section('1c. 抢答原子性');
+{
+  const { claimReply, releaseClaim } = await import('../lib/bus.mjs');
+  fs.writeFileSync(path.join(TMP, '.claims.jsonl'), '', 'utf8');
+
+  ok('第一个抢到', claimReply(900, 'hermes') === true);
+  ok('第二个抢不到', claimReply(900, 'opencode') === false);
+  ok('不同 seq 互不干扰', claimReply(901, 'opencode') === true);
+  ok('抢答落到磁盘（可审计）', fs.readFileSync(path.join(TMP, '.claims.jsonl'), 'utf8').split('\n').filter(Boolean).length === 2);
+  ok('releaseClaim 能清掉', releaseClaim(900) === true);
+  ok('清掉后能再抢', claimReply(900, 'opencode') === true);
+
+  // 真并发：8 个独立进程同时抢同一个 seq，只能有一个赢。
+  // 关键是「投喂前先抢」——投喂到写回要几十秒到几分钟，只靠日志里有没有
+  // reply_to 判断，两个 driver 会都认为自己该答。
+  const N = 8;
+  fs.writeFileSync(path.join(TMP, '.claims.jsonl'), '', 'utf8');
+  const sf = path.join(TMP, 'claim-probe.mjs');
+  fs.writeFileSync(sf, `
+    const { claimReply } = await import(${JSON.stringify(pathToFileURL(path.join(REPO, 'lib', 'bus.mjs')).href)});
+    process.stdout.write(String(claimReply(950, process.argv[2])));
+  `, 'utf8');
+
+  const results = await Promise.all(
+    Array.from({ length: N }, (_, i) => new Promise((res) => {
+      const p = spawn(process.execPath, [sf, 'w' + i], {
+        env: { ...process.env, AGENT_BUS_ROOT: TMP }, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let so = '', se = '';
+      p.stdout.on('data', (d) => { so += d; });
+      p.stderr.on('data', (d) => { se += d; });
+      p.on('exit', () => res({ out: so.trim(), err: se.trim().split('\n')[0] || '' }));
+    })),
+  );
+  const crashed = results.filter((r) => r.out !== 'true' && r.out !== 'false');
+  ok('并发抢答进程都没崩', crashed.length === 0, crashed.map((c) => c.err).join(' | '));
+  const winners = results.filter((r) => r.out === 'true');
+  ok(`${N} 进程并发抢同一 seq：只有 1 个赢`, winners.length === 1, `赢了 ${winners.length} 个：${results.map((r) => r.out).join(',')}`);
+  ok('其余全部拿到 false', results.filter((r) => r.out === 'false').length === N - 1);
+
+  fs.rmSync(path.join(TMP, '.claims.jsonl'), { force: true });
+  fs.rmSync(sf, { force: true });
 }
 
 // ---------------- 2. 熔断计数 ----------------
@@ -137,6 +213,41 @@ section('4. driver 游标不重放');
     once: true, intervalMs: 10,
   });
   ok('首次启动不投喂历史（基线=最新 seq）', calledFresh === 0, `投喂了 ${calledFresh} 条`);
+}
+
+// ---------------- 4b. 群聊：两个 driver 面对同一条 @全体 ----------------
+section('4b. 群聊广播只产生一条回复');
+{
+  const { runDriver } = await import('../drivers/driver.mjs');
+  fs.writeFileSync(path.join(TMP, 'room.jsonl'), '', 'utf8');
+  fs.rmSync(path.join(TMP, '.claims.jsonl'), { force: true });
+  for (const n of ['hermes', 'opencode']) fs.rmSync(path.join(TMP, `.cursor-${n}.json`), { force: true });
+  writeConfig({ autoChat: true, maxHop: 3, pausedUntil: 0, pauseReason: '', hopReset: {} });
+
+  // 两个 driver 各建一次基线（模拟刚装好、开关刚打开）
+  const mk = (tag, counter) => async () => ({
+    ask: async () => { counter.n++; return `${tag} 的回答`; },
+    close: () => {},
+  });
+  const ch = { n: 0 }, co = { n: 0 };
+  await runDriver({ name: 'hermes', createSession: mk('hermes', ch), once: true, intervalMs: 10 });
+  await runDriver({ name: 'opencode', createSession: mk('opencode', co), once: true, intervalMs: 10 });
+
+  // 一条不带 @ 的群消息
+  append({ from: 'human', text: '大家谁在', to: '*', mentions: '*', via: 'human', thread: 't-grp' });
+
+  // 两个 driver 都来轮询：只有抢到的那个答
+  await runDriver({ name: 'hermes', createSession: mk('hermes', ch), once: true, intervalMs: 10 });
+  await runDriver({ name: 'opencode', createSession: mk('opencode', co), once: true, intervalMs: 10 });
+
+  ok('只有一个人回答了', ch.n + co.n === 1, `hermes=${ch.n} opencode=${co.n}`);
+
+  const replies = readAll().filter((m) => m.via && m.via !== 'human');
+  ok('日志里只有 1 条回复', replies.length === 1, `实际 ${replies.length} 条`);
+  ok('回复 reply_to 指向群消息', replies[0].reply_to === 1, `reply_to=${replies[0].reply_to}`);
+  ok('回复不再标 *（否则会被无限接力）', replies[0].to !== '*' && replies[0].mentions !== '*',
+    JSON.stringify({ to: replies[0].to, mentions: replies[0].mentions }));
+  ok('回复回给发起人', replies[0].to === 'human', `to=${replies[0].to}`);
 }
 
 // ---------------- 5. 熔断由 driver 自己判（不依赖 busd） ----------------

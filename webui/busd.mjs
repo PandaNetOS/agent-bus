@@ -13,7 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ROOT, readAll, append, readCeo, writeCeo } from '../lib/bus.mjs';
 import { readConfig, writeConfig, ensureConfig } from '../lib/config.mjs';
-import { breakerState, names, gate, MAX_HOP_DEFAULT } from '../lib/gates.mjs';
+import { breakerState, names, gate, MAX_HOP_DEFAULT, BROADCAST } from '../lib/gates.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
@@ -208,16 +208,22 @@ const server = http.createServer(async (req, res) => {
       const text = String(b.text || '').trim();
       if (!text) return json(res, 400, { error: 'text 必填' });
       const from = String(b.from || 'human').trim();
-      const to = String(b.to || '').trim();
-      const mentions = String(b.mentions || '').trim() || to;
+      // 前端已经解析过 @名字，但这里自己再算一次：总线不该信任客户端传的
+      // to/mentions（同一个 API 也被 tools/say.mjs 和 curl 调）。
+      const m0 = String(text).match(/@([a-z0-9_-]+)/i);
+      const named = m0 ? m0[1].toLowerCase() : '';
+      // 群聊语义：不点名 = @全体。用 to='*' 哨兵，不是靠「to 为空」推断——
+      // v1/早期消息也满足空条件，不该被追溯成广播。
+      const broadcast = !named && String(b.broadcast ?? '1') !== '0';
+      const target = named || (broadcast ? BROADCAST : '');
       const msg = append({
         from,
         kind: 'msg',
-        to,
+        to: target,
         text,
         thread: String(b.thread || '').trim(),
         reply_to: Number(b.reply_to || 0),
-        mentions,
+        mentions: target,
         hop: 0,
         via: b.via === 'driver' ? `driver:${from}` : 'human',
       });

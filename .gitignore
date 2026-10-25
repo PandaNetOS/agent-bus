@@ -2,6 +2,7 @@
 room.jsonl
 .bus.lock
 .bus-dropped.jsonl
+.claims.jsonl
 ceo.txt
 hub-config.json
 

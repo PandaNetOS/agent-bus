@@ -84,31 +84,62 @@
   }
   .filter button.on { background: #17233a; color: var(--blue); border-color: var(--blue); }
   #msgs { flex: 1; overflow-y: auto; padding: 12px 14px 20px; }
-  .msg { display: grid; grid-template-columns: 46px 1fr; gap: 10px; padding: 7px 8px; border-radius: 7px; margin-bottom: 2px; }
-  .msg:hover { background: #12161c; }
-  .msg .seq { color: #484f58; font-size: 11px; text-align: right; padding-top: 2px; }
-  .msg .head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 12px; }
-  .from { font-weight: 600; }
-  .from.human { color: var(--green); }
-  .from.agent { color: var(--purple); }
-  .arrow { color: #484f58; }
-  .to { color: var(--cyan); }
-  .kind { font-size: 10px; padding: 0 5px; border-radius: 4px; background: #21262d; color: var(--dim); }
-  .kind.task { background: #341a00; color: #f0b72f; }
-  .kind.done { background: #0f2f18; color: var(--green); }
-  .kind.claim { background: #10243f; color: var(--blue); }
-  .hop { font-size: 10px; color: var(--purple); border: 1px solid #4b2d6b; border-radius: 4px; padding: 0 5px; }
-  .via { font-size: 10px; color: #6e7681; }
-  .body { margin-top: 3px; white-space: pre-wrap; word-break: break-word; }
-  .msg.blocked { background: #241a00; border-left: 2px solid var(--yellow); }
-  .msg.auto { border-left: 2px solid #3d2a55; padding-left: 6px; }
+  /* ---- 群聊气泡 ---- */
+  .day {
+    text-align: center; color: #484f58; font-size: 11px; margin: 14px 0 8px;
+  }
+  .day span { background: var(--panel2); border-radius: 20px; padding: 2px 12px; }
+  .row { display: flex; gap: 10px; padding: 3px 8px; }
+  .row.mine { flex-direction: row-reverse; }
+  .avatar {
+    width: 30px; height: 30px; border-radius: 8px; flex: 0 0 auto;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700; color: #fff; user-select: none;
+  }
+  .avatar.sq { border-radius: 8px; }
+  .bubblewrap { max-width: 74%; min-width: 0; }
+  .nick { font-size: 11.5px; color: var(--dim); margin-bottom: 3px; display: flex; gap: 6px; align-items: center; }
+  .row.mine .nick { flex-direction: row-reverse; }
+  .bubble {
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 10px;
+    padding: 7px 11px; white-space: pre-wrap; word-break: break-word;
+    border-top-left-radius: 2px;
+  }
+  .row.mine .bubble { background: #1f6f3f; border-color: #2ea043; border-top-left-radius: 10px; border-top-right-radius: 2px; }
+  .bubble.auto { background: #1d1526; border-color: #3d2a55; }
+  .bubble.blocked { background: #241a00; border-color: #6b4400; }
+  .row.cont { margin-top: -4px; }
+  .row.cont .avatar { visibility: hidden; }
+  .meta2 { font-size: 10.5px; color: #484f58; margin-top: 3px; display: flex; gap: 6px; align-items: center; }
+  .row.mine .meta2 { flex-direction: row-reverse; }
+  .chip {
+    font-size: 10px; padding: 0 5px; border-radius: 4px;
+    background: #21262d; color: var(--dim); border: 1px solid var(--line);
+  }
+  .chip.task { background: #341a00; color: #f0b72f; border-color: #6b4400; }
+  .chip.done { background: #0f2f18; color: var(--green); }
+  .chip.claim { background: #10243f; color: var(--blue); }
+  .chip.hop { color: var(--purple); border-color: #4b2d6b; }
+  .chip.bcast { color: var(--cyan); border-color: #1d4b4f; }
   .release {
-    margin-left: 8px; font-size: 10.5px; background: #3d2a55; color: var(--purple);
+    font-size: 10.5px; background: #3d2a55; color: var(--purple);
     border: 1px solid #4b2d6b; border-radius: 5px; padding: 1px 7px; cursor: pointer;
   }
   .release:hover { background: #4b2d6b; }
+  .typing { display: flex; gap: 3px; align-items: center; padding: 9px 11px; }
+  .typing i {
+    width: 5px; height: 5px; border-radius: 50%; background: var(--dim);
+    animation: blink 1.3s infinite;
+  }
+  .typing i:nth-child(2) { animation-delay: .2s; }
+  .typing i:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 60%, 100% { opacity: .25; } 30% { opacity: 1; } }
 
   #composer { border-top: 1px solid var(--line); padding: 10px 14px 14px; background: var(--panel); flex: 0 0 auto; }
+  #composer .tip {
+    font-size: 11px; color: var(--cyan); margin-bottom: 6px; min-height: 15px;
+  }
+  #composer .tip.named { color: var(--purple); }
   #composer .row { display: flex; gap: 8px; align-items: flex-end; }
   #say {
     flex: 1; min-height: 42px; max-height: 150px; resize: vertical;
@@ -196,11 +227,12 @@
   </div>
   <div id="msgs" class="col"></div>
   <div id="composer">
+    <div id="composertip" class="tip">发给全体 · Hermes / OpenCode 谁先抢到谁回</div>
     <div class="row">
-      <textarea id="say" placeholder="说话。@hermes 问 opencode 一个问题 → 会自动点名并只投给它"></textarea>
+      <textarea id="say" placeholder="说话…（不点名 = @全体；@hermes 只给它，@opencode 转交）"></textarea>
       <button id="send">发送</button>
     </div>
-    <div id="hint">@名字 定向点名 · 回车发送 · Shift+回车换行 · hop 到顶的消息会标黄，点「放行」继续</div>
+    <div id="hint">回车发送 · Shift+回车换行 · 带 @名字 定向点名，不带则 @全体（一人回复）· hop 到顶的消息标黄，点「放行」继续</div>
   </div>
 </main>
 
@@ -309,30 +341,96 @@ function passFilter(m) {
   return true;
 }
 
-function msgNode(m) {
-  const isAuto = m.via && m.via !== 'human';
-  const overHop = isAuto && (m.hop || 0) >= (STATE?.maxHop ?? 3) && !(STATE?.config?.hopReset || {})[m.thread];
-  const d = el('div', 'msg' + (isAuto ? ' auto' : '') + (overHop ? ' blocked' : ''));
-  d.append(el('div', 'seq mono', '#' + m.seq));
+/** 每个成员一个稳定颜色 + 首字（拍脑袋取哈希，不存配置） */
+const AVATAR_HUE = {};
+function hueOf(name) {
+  if (AVATAR_HUE[name] != null) return AVATAR_HUE[name];
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360;
+  return (AVATAR_HUE[name] = h);
+}
+function initialOf(name) {
+  return String(name || '?').trim().charAt(0).toUpperCase() || '?';
+}
+function avatarNode(name) {
+  const h = hueOf(name);
+  const a = el('div', 'avatar sq', initialOf(name));
+  a.style.background = `hsl(${h} 46% 38%)`;
+  a.title = name;
+  return a;
+}
 
-  const box = el('div');
-  const head = el('div', 'head');
-  head.append(el('span', 'from ' + (isAuto ? 'agent' : 'human'), m.from));
-  if (m.to) { head.append(el('span', 'arrow', '→')); head.append(el('span', 'to', m.to)); }
-  if (m.kind !== 'msg') head.append(el('span', 'kind ' + m.kind, m.kind));
-  if (m.thread) head.append(el('span', 'badge mono', m.thread));
-  if (m.hop > 0) head.append(el('span', 'hop', '↻' + m.hop));
-  if (isAuto) head.append(el('span', 'via', m.via));
-  head.append(el('span', 'via', hhmmss(m.ts)));
+const dayKey = (ts) => {
+  const d = new Date(ts);
+  return isNaN(d) ? '' : `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+};
+const isToday = (ts) => dayKey(ts) === dayKey(Date.now());
+
+/**
+ * 群聊气泡。同一人 3 分钟内连发：隐藏头像和昵称，只留气泡（连续消息合并），
+ * 否则每句话都顶着一个大脑袋，群聊看着像日志。
+ */
+function msgNode(m, prev) {
+  const isAuto = m.via && m.via !== 'human';
+  const mine = m.from === 'human' || (!isAuto && m.from === 'human');
+  const bcast = m.to === '*';
+  const overHop = isAuto && (m.hop || 0) >= (STATE?.maxHop ?? 3) && !(STATE?.config?.hopReset || {})[m.thread];
+
+  const cont = prev && prev.from === m.from
+    && Math.abs(new Date(m.ts) - new Date(prev.ts)) < 180000;
+
+  const row = el('div', 'row' + (mine ? ' mine' : '') + (cont ? ' cont' : ''));
+  row.append(avatarNode(m.from));
+
+  const wrap = el('div', 'bubblewrap');
+  if (!cont) {
+    const nick = el('div', 'nick');
+    nick.append(el('span', null, m.from));
+    if (m.from === (STATE?.ceo || '')) nick.append(el('span', 'badge ceo', 'CEO'));
+    if (bcast) nick.append(el('span', 'chip bcast', '@全体'));
+    else if (m.to) nick.append(el('span', 'chip', '→ ' + m.to));
+    wrap.append(nick);
+  }
+
+  const bub = el('div', 'bubble' + (isAuto ? ' auto' : '') + (overHop ? ' blocked' : ''));
+  bub.textContent = m.text;
+  wrap.append(bub);
+
+  const meta = el('div', 'meta2');
+  meta.append(el('span', null, hhmmss(m.ts)));
+  if (m.kind !== 'msg') meta.append(el('span', 'chip ' + m.kind, m.kind));
+  if (m.hop > 0) meta.append(el('span', 'chip hop', '↻' + m.hop));
+  if (isAuto) meta.append(el('span', 'chip', m.via));
+  if (m.thread) meta.append(el('span', 'chip', m.thread));
   if (overHop) {
     const b = el('button', 'release', '放行');
     b.onclick = () => fetch('/api/hop-reset', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ thread: m.thread }) });
-    head.append(b);
+    meta.append(b);
   }
-  box.append(head);
-  box.append(el('div', 'body', m.text));
-  d.append(box);
-  return d;
+  meta.append(el('span', null, '#' + m.seq));
+  wrap.append(meta);
+  row.append(wrap);
+  return row;
+}
+
+/** 谁在思考：按 driver 心跳里的 currentSeq 显示「正在输入」 */
+function typingNode() {
+  const busy = (STATE?.members || []).filter((m) => m.state === 'thinking' && m.currentSeq);
+  const frag = document.createDocumentFragment();
+  for (const b of busy) {
+    const row = el('div', 'row');
+    row.append(avatarNode(b.name));
+    const wrap = el('div', 'bubblewrap');
+    const bub = el('div', 'bubble auto typing');
+    bub.append(el('i'), el('i'), el('i'));
+    wrap.append(bub);
+    const meta = el('div', 'meta2');
+    meta.append(el('span', null, `${b.name} 正在输入… #${b.currentSeq}`));
+    wrap.append(meta);
+    row.append(wrap);
+    frag.append(row);
+  }
+  return frag;
 }
 
 function renderMsgs() {
@@ -340,8 +438,23 @@ function renderMsgs() {
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
   box.innerHTML = '';
   const list = MSGS.filter(passFilter).slice(-400);
-  if (!list.length) box.append(el('div', 'empty', '还没有消息'));
-  for (const m of list) box.append(msgNode(m));
+  if (!list.length) { box.append(el('div', 'empty', '还没有消息')); return; }
+
+  let prevDay = '';
+  let prevMsg = null;
+  for (const m of list) {
+    const dk = dayKey(m.ts);
+    if (dk && dk !== prevDay) {
+      prevDay = dk;
+      const d = el('div', 'day');
+      d.append(el('span', null, isToday(m.ts) ? '今天' : dk));
+      box.append(d);
+      prevMsg = null; // 跨天不再合并
+    }
+    box.append(msgNode(m, prevMsg));
+    prevMsg = m;
+  }
+  box.append(typingNode());
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
 
@@ -407,25 +520,51 @@ function connect() {
 }
 
 // ---------- 交互 ----------
+const AGENT_SET = () => new Set((STATE?.members || []).map((m) => m.name));
+
+/** 输入框上方实时提示：这条会发给谁。不点名 = @全体。 */
+function updateTip() {
+  const ta = $('#say');
+  const tip = $('#composertip');
+  if (!ta || !tip) return;
+  const m = ta.value.match(/@([a-z0-9_-]+)/i);
+  if (!ta.value.trim()) {
+    tip.className = 'tip';
+    tip.textContent = '发给全体 · Hermes / OpenCode 谁先抢到谁回';
+    return;
+  }
+  if (m) {
+    const n = m[1].toLowerCase();
+    const known = AGENT_SET().has(n);
+    tip.className = 'tip named';
+    tip.textContent = known
+      ? `只发给 @${n}${n === (STATE?.ceo || '') ? '（CEO）' : ''}`
+      : `@${n} 不是群成员（群里现在有：${(STATE?.members || []).map((x) => x.name).join(' / ')}）`;
+    return;
+  }
+  tip.className = 'tip';
+  tip.textContent = '发给全体 · Hermes / OpenCode 谁先抢到谁回';
+}
+
 async function send() {
   const ta = $('#say');
   const text = ta.value.trim();
   if (!text) return;
-  const m = text.match(/@([a-z0-9_-]+)/i);
-  const body = {
-    from: 'human',
-    text,
-    to: m ? m[1].toLowerCase() : '',
-    mentions: m ? m[1].toLowerCase() : '',
-  };
   ta.value = '';
+  updateTip();
   $('#send').disabled = true;
   try {
-    await fetch('/api/say', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    // to/mentions 不自己算，交给 /api/say 从文本里解析 —— 总线不该信任
+    // 客户端传的收件人（同一个 API 也被 tools/say.mjs 和 curl 调）。
+    await fetch('/api/say', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ from: 'human', text }),
+    });
   } finally { $('#send').disabled = false; }
 }
 
 $('#send').onclick = send;
+$('#say').addEventListener('input', updateTip);
 $('#say').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
@@ -457,6 +596,7 @@ document.querySelectorAll('.filter button').forEach((b) => {
   AGENTS = (STATE.members || []).map((m) => m.name);
   await loadLog();
   connect();
+  updateTip();
   setInterval(loadState, 5000);
 })();
 </script>

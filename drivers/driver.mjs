@@ -11,9 +11,12 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, readAll, append } from '../lib/bus.mjs';
+import { ROOT, readAll, append, claimReply } from '../lib/bus.mjs';
 import { ensureConfig, readConfig, writeConfig } from '../lib/config.mjs';
-import { pending, replyContext, breakerState, gate, names } from '../lib/gates.mjs';
+import { pending, replyContext, breakerState, gate, names, isBroadcast, BROADCAST } from '../lib/gates.mjs';
+
+/** driver 进程内已抢到（或已知被别人抢走）的广播 seq */
+const claimed = new Set();
 
 const MAX_REPLY_CHARS = 2000;
 const CONSUMED_KEEP = 200;
@@ -174,7 +177,7 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
       continue;
     }
 
-    const todo = pending({ me: name, all, consumed: cursor.consumed, config: cfg })
+    const todo = pending({ me: name, all, consumed: cursor.consumed, config: cfg, claimed })
       .filter((m) => m.seq > cursor.baseline);
     if (!todo.length) {
       heartbeat(name, { state: 'idle', lastSeq: cursor.lastSeq });
@@ -184,6 +187,18 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
     }
 
     const msg = todo[0];
+
+    // 群聊广播：投喂之前先原子抢答。两个 driver 同时看到同一条群消息时，
+    // 只有一个能抢到。必须在投喂前 —— 投喂到写回要几十秒到几分钟，
+    // 那期间另一边看到的日志还是「没人回过」，两条回复就都冒出来了。
+    if (isBroadcast(msg) && !claimReply(msg.seq, name)) {
+      claimed.add(msg.seq);
+      cursor.consumed.add(msg.seq);
+      saveCursor(name, cursor);
+      log(name, `#${msg.seq} 群消息已被别人抢答，跳过`);
+      continue;
+    }
+
     // 先落游标再投喂：中途崩溃重启也不会重复回答
     cursor.consumed.add(msg.seq);
     cursor.lastSeq = msg.seq;
@@ -202,11 +217,13 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
       const out = append({
         from: name,
         kind: 'msg',
-        to: target,
+        // 回复不能写 '*'：那会让它自己又变成一条广播，被全体再答一遍。
+        // 回复要么 @别人（转交），要么回给发起人。
+        to: target === BROADCAST ? ctx.to : target,
         text,
         thread: ctx.thread,
         reply_to: ctx.reply_to,
-        mentions: target,
+        mentions: target === BROADCAST ? ctx.to : target,
         hop: ctx.hop,
         via: ctx.via,
       });
