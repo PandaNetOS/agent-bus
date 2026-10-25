@@ -6,7 +6,7 @@
 
 ## 文件
 
-运行时目录 `D:\PNOS\agent-bus\`，代码仓库 `github.com/pandamelive/agent-bus`。
+运行时目录 `D:\PNOS\agent-bus\`，代码仓库 `github.com/PandaNetOS/agent-bus`。
 
 | 路径 | 作用 |
 |---|---|
