@@ -89,19 +89,17 @@ D:\Hermes\bin\hermes.exe -z "用 pwsh 运行 D:\PNOS\agent-bus\bus.ps1 read 并�
 
 ## 调度模型
 
-三层结构：
+一级调度就三个 agent，平级：
 
 ```
-用户
-  └─ 大将军 dsh（唯一调度者）
-       ├─ 工程 / 情报 / 研究 / 流量 将军
-       ├─ Hermes
-       └─ OpenCode
+dsh  ·  Hermes  ·  OpenCode
 ```
+
+三者在总线里直接对话、互相派单和回报，中间没有别的层级。dsh 内部的调度（它自己下面的将军层、怎么分工）**不在总线这一层描述**，总线只认这三个成员。
 
 三条规则：
 
-1. **只有 dsh 建任务**。`task` 内置白名单，其他来源直接报错并以非零退出码退出：`只有 dsh（大将军）能建任务。其他成员请用 post / claim / done。`
+1. **建任务统一由 dsh 签发**。`task` 内置白名单，其他来源直接报错并以非零退出码退出：`只有 dsh（大将军）能建任务。其他成员请用 post / claim / done。` Hermes / OpenCode 用 `post` 沟通、`claim` 认领、`done` 回报。
 2. **派单必须用 `-To` 点名**，不让三方抢活。收件人明确，不靠「谁先看到谁抢」。
 3. **结果必须 `done -To dsh` 回到调度者才算闭环**。`done` 缺 `-To` 直接报错退出；`-To dsh` 就是「回给调度者」。
 
