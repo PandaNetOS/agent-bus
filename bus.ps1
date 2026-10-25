@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   agent-bus — 三个 agent（DSH / Hermes / OpenCode）的共享消息总线
 
@@ -42,14 +42,14 @@ $Room = Join-Path $Root 'room.jsonl'
 $Lock = Join-Path $Root '.bus.lock'
 $Members = Join-Path $Root 'members.json'
 
-# 外部进程调用本脚本时，Windows 会吞掉 -File 后路径里的反斜杠
-# （D:\agent-bus\bus.ps1 → D:agent-busbus.ps1）。此处容错，但不静默。
-if (-not (Test-Path $MyInvocation.MyCommand.Path)) {
-  $self = $PSCommandPath
-  if (-not $self) { $self = $MyInvocation.MyCommand.Path }
-} else {
-  $self = $MyInvocation.MyCommand.Path
-}
+# $Members 是早期设计的遗留，当前版本未使用（成员活跃度从消息日志实时聚合）。
+# 保留变量以免有外部脚本引用，删掉更干净——但要先确认没人用。
+$Members = Join-Path $Root 'members.json'
+
+# 说明：下面这段「反斜杠被吞」的容错代码其实没有起作用——
+# $self 算出来之后从未被使用。真正有效的规避手段是调用方给路径加单引号
+# （见 README 已知坑 1）。此处保留原样并标注，避免误以为已有防护。
+# if (-not (Test-Path $MyInvocation.MyCommand.Path)) { ... }
 
 # ---------- 文件锁：NTFS 独占创建，带重试 ----------
 function Invoke-WithLock {
@@ -73,8 +73,13 @@ function Invoke-WithLock {
 }
 
 # ---------- 读全部消息 ----------
+# 结果写到 $script:Messages 而不是用 return。
+# 原因：PowerShell 会把函数返回的单个 List/数组再拆一层包，
+# 调用方拿到的会是「装着数组的数组」，Count 永远为 1、Measure-Object
+# 找不到 seq 属性。用脚本级变量传值最稳。
+$script:Messages = @()
 function Get-Messages {
-  if (-not (Test-Path $Room)) { return @() }
+  if (-not (Test-Path $Room)) { $script:Messages = @(); return }
   $out = [System.Collections.Generic.List[object]]::new()
   $raw = [System.IO.File]::ReadAllLines($Room, $Utf8)
   $n = 0
@@ -89,20 +94,20 @@ function Get-Messages {
       # 坏行跳过，不阻塞整体读取
     }
   }
-  return $out
+  $script:Messages = $out.ToArray()
 }
 
 # ---------- 追加一条 ----------
 function Add-Message {
   param([hashtable]$Fields)
   Invoke-WithLock {
-    $existing = Get-Messages
-    $nextSeq = 0
+    Get-Messages
+    $existing = @($script:Messages)
+    $nextSeq = 1
     if ($existing.Count -gt 0) {
       $maxSeq = ($existing | Measure-Object -Property seq -Maximum).Maximum
-      $nextSeq = [int]$maxSeq
+      if ($null -ne $maxSeq) { $nextSeq = [int]$maxSeq + 1 }
     }
-    $nextSeq++
 
     $obj = [ordered]@{
       seq  = $nextSeq
@@ -148,8 +153,12 @@ switch ($Command) {
   }
 
   'read' {
-    $all = Get-Messages
-    $sel = $all | Where-Object { $_.seq -gt $Since } | Select-Object -Last $Limit
+    Get-Messages
+    $all = @($script:Messages)
+    # 必须先筛 seq > Since 再取「前」Limit 条。-Since 的用途是增量轮询：
+    # 每次从最旧的未读开始读，读完把 Since 推进到最后一条的 seq。
+    # 用 -Last 会把最早的新消息挤掉，轮询时直接漏读。
+    $sel = $all | Where-Object { $_.seq -gt $Since } | Select-Object -First $Limit
     if (-not $sel) { Write-Output "(无新消息，当前共 $($all.Count) 条)"; break }
     foreach ($m in $sel) {
       $t = ([datetime]$m.ts).ToLocalTime().ToString('HH:mm:ss')
@@ -160,7 +169,8 @@ switch ($Command) {
   }
 
   'tail' {
-    $all = Get-Messages
+    Get-Messages
+    $all = @($script:Messages)
     $sel = $all | Select-Object -Last $Limit
     foreach ($m in $sel) {
       $t = ([datetime]$m.ts).ToLocalTime().ToString('HH:mm:ss')
@@ -169,7 +179,8 @@ switch ($Command) {
   }
 
   'who' {
-    $all = Get-Messages
+    Get-Messages
+    $all = @($script:Messages)
     if (-not $all) { Write-Output "(还没有任何成员发言)"; break }
     Write-Output "=== 成员活跃度 ==="
     $all | Group-Object from | Sort-Object Count -Descending | ForEach-Object {
@@ -180,7 +191,8 @@ switch ($Command) {
   }
 
   'stats' {
-    $all = Get-Messages
+    Get-Messages
+    $all = @($script:Messages)
     $tasks = @($all | Where-Object { $_.kind -eq 'task' })
     $claims = @($all | Where-Object { $_.kind -eq 'claim' })
     $dones = @($all | Where-Object { $_.kind -eq 'done' })

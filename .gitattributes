@@ -1,0 +1,12 @@
+# PowerShell 脚本：统一 CRLF + 保留 UTF-8 BOM。
+# 原因：本机主力是 Windows PowerShell 5.1，它读无 BOM 的 UTF-8 .ps1 会按 GBK 解，
+# 中文第二字节被当 GBK 尾字节，吞掉紧跟的 ASCII 字符（"或 {），导致整脚本语法错误。
+# pwsh 7 两种都吃，所以 BOM 是安全解。详见 README「已知坑 4」。
+*.ps1 text eol=crlf working-tree-encoding=UTF-8
+
+# 日志与数据文件按原样，别让 git 改行尾
+*.jsonl -text
+
+# 普通文本
+*.md text eol=crlf
+*.json text eol=crlf
