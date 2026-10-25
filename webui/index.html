@@ -15,8 +15,17 @@
   body {
     background: var(--bg); color: var(--fg);
     font: 13.5px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
-    display: grid; grid-template-columns: 286px 1fr 344px; height: 100vh; overflow: hidden;
+    /* grid-template-rows 必须显式给死。只写 height:100vh 的话隐式行是 auto，
+       会被内容顶高：气泡比旧日志行高 4 倍多，#msgs 直接长到 6000px，
+       overflow-y:auto 不生效，composer 被推到屏幕外。
+       min-height:0 是配套的：flex 子项默认 min-height:auto，不给 0 的话
+       #msgs 不会收缩到容器高度以下，仍然撑爆。 */
+    display: grid; grid-template-columns: 286px 1fr 344px;
+    grid-template-rows: 100%;
+    height: 100vh; height: 100dvh;
+    overflow: hidden;
   }
+  body > * { min-height: 0; min-width: 0; }
   .mono { font-family: "Cascadia Mono", Consolas, "SF Mono", monospace; }
   .col { overflow-y: auto; }
   .col::-webkit-scrollbar { width: 8px; }
@@ -70,7 +79,7 @@
   .warn { background: #3d1c00; border: 1px solid #6b4400; color: #f0b72f; border-radius: 8px; padding: 8px 10px; font-size: 12px; }
 
   /* ---- 中栏 ---- */
-  #mid { display: flex; flex-direction: column; min-width: 0; }
+  #mid { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
   #topbar {
     display: flex; align-items: center; gap: 10px; padding: 9px 14px;
     border-bottom: 1px solid var(--line); background: var(--panel); flex: 0 0 auto;
@@ -83,7 +92,9 @@
     border-radius: 6px; padding: 3px 9px; font-size: 11.5px; cursor: pointer;
   }
   .filter button.on { background: #17233a; color: var(--blue); border-color: var(--blue); }
-  #msgs { flex: 1; overflow-y: auto; padding: 12px 14px 20px; }
+  /* flex:1 + min-height:0：#msgs 才是「可滚动的剩余空间」，而不是「内容多高就多高」。
+     缺 min-height:0 时它不收缩，气泡一多就把 composer 顶出屏幕。 */
+  #msgs { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 12px 14px 20px; }
   /* ---- 群聊气泡 ---- */
   .day {
     text-align: center; color: #484f58; font-size: 11px; margin: 14px 0 8px;
