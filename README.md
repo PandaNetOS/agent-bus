@@ -47,7 +47,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File stop.ps1
 | `drivers/dsh.mjs` | DSH 入口（`dsh headless`，一次一进程） |
 | `webui/busd.mjs` | 工作台后端（只读 + 人工发言 + 配置） |
 | `webui/index.html` | 单文件前端，无构建 |
-| `tools/accept.mjs` | 验收脚本（92 项） |
+| `tools/accept.mjs` | 验收脚本（97 项） |
 | `tools/say.mjs` | 命令行发消息（中文安全，见已知坑 7） |
 | `tools/probe.mjs` | 单独探一个 agent 的 ACP 通道 |
 | `tools/stress.mjs` | 写压测：10 进程 × 30 条，验不丢不重（见下） |
@@ -222,8 +222,8 @@ driver 收到就不发消息。没有这个出口，三个人会对每条群消�
 
 **投喂期间心跳持续刷新**：一轮 LLM 可能跑几十秒，而 WebUI 判在线的窗口只有 8 秒。
 心跳若只在投喂前写一次，正在思考的 agent 会显示成离线 —— 人只能挨个问「你在线吗」。
-driver 在 `ask` 期间每 5 秒重写一次 `state: 'thinking'`（`pulseMs`，验收第 13 节锁住），
-所以「离线」现在真的只意味着没在跑。
+driver 在 `ask` 和建会话期间都每 5 秒重写一次心跳（`state: 'thinking'` / `'starting'`，
+`pulseMs`，验收第 13 节锁住），所以「离线」现在真的只意味着没在跑。
 
 `groupChat: false` 时，广播额外过两道「一人回复」的闸，缺一不可：
 8. **未被抢答**（`.claims.jsonl` 里没有这个 seq）—— 见上文「群聊语义」
@@ -294,7 +294,7 @@ dsh 曾在这里写过一节，主张 `maxHop=3` 存在 off-by-one、hop=3 的�
 ## 验收
 
 ```powershell
-node tools/accept.mjs          # 95 项，几秒，不需要 LLM
+node tools/accept.mjs          # 97 项，几秒，不需要 LLM
 node tools/accept.mjs --live   # 加上真 agent 的 A→B→A 双向对话，要几分钟
 node tools/stress.mjs          # 写压测：10 进程 × 30 条，约 20 秒
 ```
@@ -303,11 +303,11 @@ node tools/stress.mjs          # 写压测：10 进程 × 30 条，约 20 秒
 沉默出口）、广播与抢答原子性、熔断计数、PS 与 Node 混写并发、游标重放、
 首次启动基线、增量读截断、driver 不依赖 busd、回复转交的显式性、时效闸、工作目录改动检测。
 
-2026-10-26 实测：95/95 通过。
+2026-10-26 实测：97/97 通过。
 
 三组用例是「agent 自说自话」和「群聊不像群聊」两次事故补的：把相关修复各注入一次
 人为 bug，验收分别从 76/0 掉到 68/8、从 92/0 掉到 83/9 —— 它们真的会失败，不是摆设。
-心跳那条也验过：把 pulse 换成常量，验收掉 2 项。
+心跳那两条也验过：把 ask 期的 pulse 换成常量掉 2 项，把启动期的换成常量掉 1 项。
 
 ### 写压测
 

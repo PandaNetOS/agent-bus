@@ -655,6 +655,21 @@ section('13. 长任务期间心跳要续');
     during && during.ts > before, `before=${before} during=${during && during.ts}`);
   ok("ask 期间状态是 thinking", during && during.state === "thinking", JSON.stringify(during));
 
+  // C. 建会话期间也要报活（ACP 冷启动实测 ~10 秒，比 8 秒窗口还长）
+  append({ from: 'human', text: '再想一个', to: '*', mentions: '*', via: 'human', thread: 't-hb2' });
+  let bootBefore = 0;
+  let bootDuring = null;
+  const slowBoot = async () => {
+    bootBefore = JSON.parse(fs.readFileSync(hb, "utf8")).ts;
+    await new Promise((r) => setTimeout(r, 300));
+    bootDuring = JSON.parse(fs.readFileSync(hb, "utf8"));
+    return { ask: async () => "ok", close: () => {} };
+  };
+  await runDriver({ name: 'hermes', createSession: slowBoot, once: true, intervalMs: 10, pulseMs: 40 });
+  ok("建会话期间心跳有刷新",
+    bootDuring && bootDuring.ts > bootBefore, `before=${bootBefore} during=${bootDuring && bootDuring.ts}`);
+  ok("建会话期间状态是 starting", bootDuring && bootDuring.state === "starting", JSON.stringify(bootDuring));
+
   // 跨文件不变量：心跳间隔必须小于 busd 判在线的窗口，否则会闪成离线
   const drvSrc = fs.readFileSync(path.join(REPO, "drivers/driver.mjs"), "utf8");
   const busdSrc = fs.readFileSync(path.join(REPO, "webui/busd.mjs"), "utf8");

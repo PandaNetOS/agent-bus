@@ -289,9 +289,16 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
 
   const ensureSession = async () => {
     if (session) return session;
+    // 起会话本身也可能超过 busd 的 8 秒窗口（ACP 冷启动实测 ~10 秒），
+    // 所以启动期间同样要续心跳，否则「正在启动」会显示成「没在跑」。
     heartbeat(name, { state: 'starting' });
-    // onEvent 走一个可变引用：会话是长命的，但每条消息的 emit 绑定不同的 seq
-    session = await createSession({ onEvent: (e) => currentEmit(e) });
+    const boot = setInterval(() => heartbeat(name, { state: 'starting' }), pulseMs);
+    try {
+      // onEvent 走一个可变引用：会话是长命的，但每条消息的 emit 绑定不同的 seq
+      session = await createSession({ onEvent: (e) => currentEmit(e) });
+    } finally {
+      clearInterval(boot);
+    }
     heartbeat(name, { state: 'idle' });
     return session;
   };
