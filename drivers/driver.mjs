@@ -185,28 +185,70 @@ function trimStream(name, keep = 400) {
 }
 
 /** 把总线消息包成给 agent 的指令 */
-export function buildPrompt(msg, me) {
+/**
+ * 投喂给 agent 的提示词。
+ *
+ * 关键设计：**它可以选择沉默。** 回复以 [SKIP] 开头表示「这话我不接」，
+ * driver 收到就不发消息。没有这个出口，群聊模式下三个人会对每条群消息
+ * 各说一遍「收到」，那比只有一个回答更糟。
+ *
+ * 同理，agent 得知道同伴的存在 —— 不然它不知道该不该接、该不该转给别人。
+ * 带上最近几句对话，否则它只看得到一条凭空冒出来的话，那不是聊天。
+ */
+export function buildPrompt(msg, me, all = []) {
   const ctx = replyContext(msg, me);
   const others = AGENT_NAMES.filter((n) => n !== me.toLowerCase());
-  const busPs1 = path.join(ROOT, 'bus.ps1');
-  return [
-    `你在 agent-bus 共享消息总线上，身份是 ${me}。`,
-    `收到一条来自 ${msg.from} 的消息（seq #${msg.seq}，第 ${ctx.hop} 跳）：`,
-    '',
-    `「${msg.text}」`,
-    '',
-    '直接回答对方。规则：',
-    `1. 你的回复会被系统自动发成一条总线消息，收件人默认是 ${msg.from}。`,
-    '   **不要自己运行 bus.ps1 发消息**——会重复，而且绕过系统的闸门。',
-     `2. 想把问题交给别人：把 @名字 写在回复的**第一行开头**（可选：${others.join(' / ')}）。`,
-     '   **正文中段提到 @名字 不算转交**，收件人仍然是问你的人 —— 所以正文里提别人是安全的。',
-     '   转交意味着问你的人等不到你的回答了，只在真的该别人接手时用。',
-    '3. 300 字内，说结论和下一步；不要复述指令，不要说「收到」。',
-    '4. 要看历史可以用（只读，不会发消息）：',
+  const busPs1 = path.join(ROOT, "bus.ps1");
+
+  // 带上最近几句对话：只看一条消息就像有人凭空插一句，那不是聊天
+  const recent = (all || []).slice(-8).filter((m) => m.seq !== msg.seq);
+  const hist = recent.length
+    ? recent.map((m) => {
+        const to = m.to && m.to !== "*" ? "→" + m.to : "";
+        const txt = String(m.text || "").replace(/\s+/g, " ").slice(0, 160);
+        return `  #${m.seq} ${m.from}${to}：${txt}`;
+      }).join("\n")
+    : "  （暂无）";
+
+  const named = !!(msg.to && msg.to !== "*");
+
+  const rules = [
+    "1. **你可以选择不说话。** 觉得没必要接、别人已经说清楚了、纯粹是寒暄、",
+    "   或者你没什么可补充的 —— 就只回复 [SKIP]，一个字都不要多写。",
+    "   沉默是正当的。群里有三个人，不需要人人都回每一句。",
+    "",
+    "2. 要说话就直说，300 字内。说你的看法、结论、下一步。",
+    "   不要复述指令，不要说「收到」，不要拍马屁。",
+    "",
+    `3. 默认回给 ${msg.from}。想把话转给别人，把 @名字 写在回复的**第一行开头**`,
+    `   （可选：${others.join(" / ")}）。正文中段提到 @名字 不算转交，安全。`,
+    "",
+    "4. 同伴说了你觉得不对的话，直接说出来 —— 你有自己的判断，不是为了附和。",
+    "   看到别人在忙同一件事，可以插话补充，也可以指出他漏了什么。",
+    "",
+    "5. **不要自己运行 bus.ps1 发消息**——会重复，而且绕过系统的闸门。",
+    "6. 要看历史可以用（只读，不会发消息）：",
     `   powershell -NoProfile -ExecutionPolicy Bypass -File "${busPs1}" tail -Limit 20`,
-     '5. **不要修改任何文件**，除非对方在消息里明确要求你改（比如「改一下 README」）。',
-     '   汇报、结案、总结都不算授权。想改就先问，等对方回「改」再动手。',
-  ].join('\n');
+    "7. **不要修改任何文件**，除非对方在消息里明确要求你改。",
+    "   汇报、结案、总结都不算授权。想改就先问。",
+  ];
+
+  return [
+    `你是 ${me}，agent-bus 群里的一员 —— 一个独立的个体，不是答题机。`,
+    `群里还有：${others.join("、")}。你们能力不同，看法也不必一致。`,
+    "",
+    "【群里刚刚在说什么】",
+    hist,
+    "",
+    `【现在这条消息】#${msg.seq} 来自 ${msg.from}`
+      + (named ? "（点名你）" : "（对群里所有人说的）") + "：",
+    `「${msg.text}」`,
+    "",
+    "决定你要不要说话。规则：",
+    ...rules,
+    "",
+    named ? "这条是点名你的，一般来说你该回应。" : "这条是群里广播，自己判断该不该接。",
+  ].join("\n");
 }
 
 /**
@@ -236,6 +278,7 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
   let session = null;
   let failures = 0;
   let stopped = false;
+  let onceDone = false;   // --once 模式下：本轮已处理（含主动 [SKIP]）过一条
   let currentEmit = () => {};
 
   process.on('SIGINT', () => { stopped = true; });
@@ -295,10 +338,11 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
 
     const msg = todo[0];
 
-    // 群聊广播：投喂之前先原子抢答。两个 driver 同时看到同一条群消息时，
-    // 只有一个能抢到。必须在投喂前 —— 投喂到写回要几十秒到几分钟，
-    // 那期间另一边看到的日志还是「没人回过」，两条回复就都冒出来了。
-    if (isBroadcast(msg) && !claimReply(msg.seq, name)) {
+    // 群聊模式（默认）：**不抢答**。三个人都看得到这条群消息，各自决定
+    // 说不说 —— 沉默由 agent 自己用 [SKIP] 表达，这才是群聊。
+    // 抢答只在 config.groupChat=false 时启用（退回旧的「一人回复」行为）。
+    const groupChat = cfg.groupChat !== false;
+    if (isBroadcast(msg) && !groupChat && !claimReply(msg.seq, name)) {
       claimed.add(msg.seq);
       cursor.consumed.add(msg.seq);
       saveCursor(name, cursor);
@@ -322,8 +366,19 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
 
     try {
       const s = await ensureSession();
-      const reply = await s.ask(buildPrompt(msg, name));
+      const reply = await s.ask(buildPrompt(msg, name, all));
       const text = String(reply || '').trim().slice(0, MAX_REPLY_CHARS) || '(无文本输出)';
+
+      // 群聊的关键出口：agent 自己决定不说话。
+      // 没有它，三个人会对每条群消息各说一遍「收到」，比只有一个回答更糟。
+      if (/^\[SKIP\]/i.test(text)) {
+        emit({ type: "skipped", seq: msg.seq });
+        log(name, `#${msg.seq} 自己选择不说话`);
+        detectFileChanges(name, msg, emit, snapBefore, workdir);
+        failures = 0;
+        if (once) onceDone = true;
+        continue;
+      }
       const ctx = replyContext(msg, name);
       const target = routeReply(text, ctx.to, name);
       const out = append({
@@ -358,7 +413,8 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
     }
 
     heartbeat(name, { state: 'idle', lastSeq: cursor.lastSeq });
-    if (once) { log(name, '--once：已处理一条，退出'); break; }
+    // onceDone：agent 用 [SKIP] 选择了沉默，也算「处理过一条」
+    if (once) { log(name, onceDone ? '--once：已处理一条（跳过），退出' : '--once：已处理一条，退出'); break; }
   }
 
   try { session?.close?.(); } catch {}

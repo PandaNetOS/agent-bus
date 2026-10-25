@@ -65,13 +65,22 @@ section('1b. 群聊广播');
   ok('广播：dsh 也看得到', gates.gate(bcast, { me: 'dsh', all: [bcast], config: cfg }).ok);
   ok('广播：自己发的仍不算', gates.gate({ ...bcast, from: 'hermes' }, { me: 'hermes', all: [], config: cfg }).reason === 'self');
 
-  // 已被抢答：磁盘上有抢答记录的 driver 必须跳过
+  // 群聊模式（默认）：三个人都看得到，不抢答 —— 各自决定说不说
+  ok('群聊模式：广播不因别人抢答而挡住我',
+    gates.gate(bcast, { me: 'hermes', all: [bcast], config: cfg, claimed: new Set([20]) }).ok);
+
+  // 已被抢答：只在 groupChat:false（旧行为「一人回复」）下生效
+  const cfgOld = { ...cfg, groupChat: false };
   const claimed = new Set([20]);
-  ok('已被抢答 → 不投喂', gates.gate(bcast, { me: 'hermes', all: [bcast], config: cfg, claimed }).reason === 'claimed');
+  ok('groupChat:false 时已被抢答 → 不投喂',
+    gates.gate(bcast, { me: 'hermes', all: [bcast], config: cfgOld, claimed }).reason === 'claimed');
 
   // 兜底：日志里已有回复（抢答记录丢失/老消息时）
   const answeredAll = [bcast, { seq: 21, from: 'opencode', to: 'human', reply_to: 20, via: 'driver:opencode', hop: 1 }];
-  ok('日志里已有人回 → 不投喂', gates.gate(bcast, { me: 'hermes', all: answeredAll, config: cfg }).reason === 'answered');
+  ok('群聊模式：别人回过了我仍能补充',
+    gates.gate(bcast, { me: 'hermes', all: answeredAll, config: cfg }).ok);
+  ok('groupChat:false 时已有人回 → 不投喂',
+    gates.gate(bcast, { me: 'hermes', all: answeredAll, config: cfgOld }).reason === 'answered');
 
   // 老消息（to 和 mentions 都为空）不能被追溯成广播 —— 那会让新装的 driver
   // 把历史里所有没点名的话全答一遍
@@ -216,38 +225,74 @@ section('4. driver 游标不重放');
 }
 
 // ---------------- 4b. 群聊：两个 driver 面对同一条 @全体 ----------------
-section('4b. 群聊广播只产生一条回复');
+section('4b. 群聊：三个人都看得到，各自决定说不说');
 {
-  const { runDriver } = await import('../drivers/driver.mjs');
-  fs.writeFileSync(path.join(TMP, 'room.jsonl'), '', 'utf8');
-  fs.rmSync(path.join(TMP, '.claims.jsonl'), { force: true });
+  const { runDriver } = await import("../drivers/driver.mjs");
+  fs.writeFileSync(path.join(TMP, "room.jsonl"), "", "utf8");
+  fs.rmSync(path.join(TMP, ".claims.jsonl"), { force: true });
   for (const n of ['hermes', 'opencode']) fs.rmSync(path.join(TMP, `.cursor-${n}.json`), { force: true });
-  writeConfig({ autoChat: true, maxHop: 3, pausedUntil: 0, pauseReason: '', hopReset: {} });
+  writeConfig({ autoChat: true, maxHop: 3, pausedUntil: 0, pauseReason: '', hopReset: {}, groupChat: true });
 
   // 两个 driver 各建一次基线（模拟刚装好、开关刚打开）
-  const mk = (tag, counter) => async () => ({
-    ask: async () => { counter.n++; return `${tag} 的回答`; },
+  const mk = (tag, counter, replyText) => async () => ({
+    ask: async () => { counter.n++; return replyText; },
     close: () => {},
   });
   const ch = { n: 0 }, co = { n: 0 };
-  await runDriver({ name: 'hermes', createSession: mk('hermes', ch), once: true, intervalMs: 10 });
-  await runDriver({ name: 'opencode', createSession: mk('opencode', co), once: true, intervalMs: 10 });
+  await runDriver({ name: 'hermes', createSession: mk('hermes', ch, '我在'), once: true, intervalMs: 10 });
+  await runDriver({ name: 'opencode', createSession: mk('opencode', co, '我也在'), once: true, intervalMs: 10 });
 
   // 一条不带 @ 的群消息
   append({ from: 'human', text: '大家谁在', to: '*', mentions: '*', via: 'human', thread: 't-grp' });
 
-  // 两个 driver 都来轮询：只有抢到的那个答
-  await runDriver({ name: 'hermes', createSession: mk('hermes', ch), once: true, intervalMs: 10 });
-  await runDriver({ name: 'opencode', createSession: mk('opencode', co), once: true, intervalMs: 10 });
+  // 群聊模式下两个 driver 都会被投喂 —— 这就是「群聊」：
+  // 每个人都是独立个体，各自决定要不要说话。
+  await runDriver({ name: 'hermes', createSession: mk('hermes', ch, '我在'), once: true, intervalMs: 10 });
+  await runDriver({ name: 'opencode', createSession: mk('opencode', co, '我也在'), once: true, intervalMs: 10 });
 
-  ok('只有一个人回答了', ch.n + co.n === 1, `hermes=${ch.n} opencode=${co.n}`);
+  ok('两个人都被投喂了（不是只有一人抢到）', ch.n === 1 && co.n === 1, `hermes=${ch.n} opencode=${co.n}`);
 
-  const replies = readAll().filter((m) => m.via && m.via !== 'human');
-  ok('日志里只有 1 条回复', replies.length === 1, `实际 ${replies.length} 条`);
-  ok('回复 reply_to 指向群消息', replies[0].reply_to === 1, `reply_to=${replies[0].reply_to}`);
-  ok('回复不再标 *（否则会被无限接力）', replies[0].to !== '*' && replies[0].mentions !== '*',
-    JSON.stringify({ to: replies[0].to, mentions: replies[0].mentions }));
-  ok('回复回给发起人', replies[0].to === 'human', `to=${replies[0].to}`);
+  const replies = readAll().filter((m) => m.via && m.via !== "human");
+  ok("两条回复都落盘了", replies.length === 2, `实际 ${replies.length} 条`);
+  ok("回复 reply_to 都指向群消息", replies.every((r) => r.reply_to === 1),
+    JSON.stringify(replies.map((r) => r.reply_to)));
+  ok("回复不再标 *（否则会被无限接力）", replies.every((r) => r.to !== "*" && r.mentions !== "*"),
+    JSON.stringify(replies.map((r) => ({ to: r.to, m: r.mentions }))));
+  ok("回复都回给发起人", replies.every((r) => r.to === "human"), JSON.stringify(replies.map((r) => r.to)));
+  ok("两个人各说各的，内容不同",
+    replies.length >= 2 && replies[0].text !== replies[1].text,
+    JSON.stringify(replies.map((r) => (r && r.text) || null)));
+
+  // ---- 沉默出口：回复 [SKIP] 就不发消息 ----
+  fs.writeFileSync(path.join(TMP, "room.jsonl"), "", "utf8");
+  fs.rmSync(path.join(TMP, ".claims.jsonl"), { force: true });
+  for (const n of ['hermes', 'opencode']) fs.rmSync(path.join(TMP, `.cursor-${n}.json`), { force: true });
+  writeConfig({ autoChat: true, maxHop: 3, pausedUntil: 0, pauseReason: '', hopReset: {}, groupChat: true });
+  const ch2 = { n: 0 }, co2 = { n: 0 };
+  await runDriver({ name: 'hermes', createSession: mk('hermes', ch2, 'x'), once: true, intervalMs: 10 });
+  await runDriver({ name: 'opencode', createSession: mk('opencode', co2, 'x'), once: true, intervalMs: 10 });
+  append({ from: 'human', text: '有人吗', to: '*', mentions: '*', via: 'human', thread: 't-grp2' });
+  // hermes 说话，opencode 选择沉默
+  await runDriver({ name: 'hermes', createSession: mk('hermes', ch2, '我在'), once: true, intervalMs: 10 });
+  await runDriver({ name: 'opencode', createSession: mk('opencode', co2, '[SKIP]'), once: true, intervalMs: 10 });
+  const r2 = readAll().filter((m) => m.via && m.via !== "human");
+  ok("选沉默的那个不发消息", r2.length === 1, `实际 ${r2.length} 条`);
+  ok("沉默的 agent 也没被记为已消费之外的问题", ch2.n === 1 && co2.n === 1,
+    `两人都被问过 hermes=${ch2.n} opencode=${co2.n}`);
+
+  // ---- groupChat:false 退回「一人回复」旧行为 ----
+  fs.writeFileSync(path.join(TMP, "room.jsonl"), "", "utf8");
+  fs.rmSync(path.join(TMP, ".claims.jsonl"), { force: true });
+  for (const n of ['hermes', 'opencode']) fs.rmSync(path.join(TMP, `.cursor-${n}.json`), { force: true });
+  writeConfig({ autoChat: true, maxHop: 3, pausedUntil: 0, pauseReason: '', hopReset: {}, groupChat: false });
+  const ch3 = { n: 0 }, co3 = { n: 0 };
+  await runDriver({ name: 'hermes', createSession: mk('hermes', ch3, 'y'), once: true, intervalMs: 10 });
+  await runDriver({ name: 'opencode', createSession: mk('opencode', co3, 'y'), once: true, intervalMs: 10 });
+  append({ from: 'human', text: '谁在', to: '*', mentions: '*', via: 'human', thread: 't-grp3' });
+  await runDriver({ name: 'hermes', createSession: mk('hermes', ch3, '我在'), once: true, intervalMs: 10 });
+  await runDriver({ name: 'opencode', createSession: mk('opencode', co3, '我也在'), once: true, intervalMs: 10 });
+  const r3 = readAll().filter((m) => m.via && m.via !== "human");
+  ok("groupChat:false 时退回一人回复", r3.length === 1, `实际 ${r3.length} 条`);
 }
 
 // ---------------- 5. 熔断由 driver 自己判（不依赖 busd） ----------------
@@ -389,9 +434,18 @@ section('8. 没人回复的诊断');
   writeRoom([mk({ seq: 1, from: "human", to: "*", mentions: "*", text: "已被回过的广播" }),
     mk({ seq: 2, from: "hermes", to: "human", hop: 1, via: "driver:hermes", reply_to: 1, text: "我来回" })]);
   {
+  // 群聊模式：广播被回过了，别人仍能补充，所以不该报「已有人回过」
+  {
     const all = readAll();
     const t = D.diagnose(all[0], all, cfg);
-    ok('已有人回过时报回过', t.includes('已有人回过'), t);
+    ok('群聊模式：已有人回过不阻塞（别人还能补充）', !t.includes('已有人回过'), t);
+  }
+  {
+    // 旧行为（一人回复）下，已有人回过就该报出来
+    const all = readAll();
+    const t = D.diagnose(all[0], all, { ...cfg, groupChat: false });
+    ok('groupChat:false 时已有人回过时报回过', t.includes('已有人回过'), t);
+  }
   }
 
   // F. 有人会回 —— 不该给任何解释
@@ -513,6 +567,57 @@ section('11. 工作目录改动检测');
   ok('子目录里的改动能发现', snapshotWorkdir(D) !== sF);
 
   fs.rmSync(D, { recursive: true, force: true });
+}
+// ---------------- 12. 群聊：每个 agent 是独立个体 ----------------
+section('12. 群聊语义：独立个体，各说各的');
+{
+  // 旧语义是「广播一人回复」：三个人里抢到的那个答，另外两个直接跳过。
+  // 那不是群聊，是三个答题机共用一个名额。新语义下：
+  //   - 群消息三个人都看得到
+  //   - 各自决定说不说（沉默用 [SKIP]）
+  //   - 接得上同伴的话（回我的话、我参与过的线程里后续的发言）
+  //   - 点名仍然只给那一个人
+  const cfg = { autoChat: true, maxHop: 3, hopReset: {}, groupChat: true };
+  const mk = (seq, from, to, extra = {}) => ({
+    seq, from, to, mentions: to, text: "t" + seq, hop: 0, via: "human", thread: "t-" + seq, ...extra,
+  });
+
+  // A. 群消息：三个人都看得到
+  const b = { seq: 1, from: "human", to: "*", mentions: "*", text: "大家好", hop: 0, via: "human", thread: "t-g" };
+  for (const who of ['hermes', 'opencode', 'dsh']) {
+    ok(`群消息：${who} 看得到`, gates.gate(b, { me: who, all: [b], config: cfg }).ok);
+  }
+
+  // B. 接得上同伴的话：别人回复了我写的消息，我看得到
+  const mine = mk(10, "hermes", "human", { via: "driver:hermes", hop: 1 });
+  const replyToMe = mk(11, "opencode", "human", {
+    via: "driver:opencode", hop: 2, reply_to: 10, thread: "t-10", text: "我不同意",
+  });
+  ok('别人回了我的话 → 我看得到（能接得上）',
+    gates.gate(replyToMe, { me: 'hermes', all: [mine, replyToMe], config: cfg }).ok);
+
+  // C. 我参与过的线程里，后续发言我也看得到
+  const inMyThread = mk(12, "dsh", "opencode", {
+    via: "driver:dsh", hop: 1, thread: "t-10", text: "插一句",
+  });
+  ok('我参与过的线程里的后续发言 → 我看得到',
+    gates.gate(inMyThread, { me: 'hermes', all: [mine, inMyThread], config: cfg }).ok);
+
+  // D. 与我无关的线程：不该打扰我（否则每条消息都会惊动三个人）
+  const other = mk(20, "dsh", "opencode", { via: "driver:dsh", hop: 1, thread: "t-other" });
+  ok('与我无关的线程 → 不打扰我',
+    gates.gate(other, { me: 'hermes', all: [other], config: cfg }).reason === 'not-named');
+
+  // E. 点名仍然只给那一个人
+  const named = mk(30, "human", "opencode", { via: "human" });
+  ok('点名 opencode → opencode 看得到', gates.gate(named, { me: 'opencode', all: [named], config: cfg }).ok);
+  ok("点名 opencode → hermes 不被打扰",
+    gates.gate(named, { me: 'hermes', all: [named], config: cfg }).reason === 'not-named');
+
+  // F. 群聊关掉就退回旧行为（一人回复）
+  const cfgOld = { ...cfg, groupChat: false };
+  ok("groupChat:false → 已被抢答的不投喂",
+    gates.gate(b, { me: 'hermes', all: [b], config: cfgOld, claimed: new Set([1]) }).reason === 'claimed');
 }
 console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====`);
 console.log(`验收 runtime: ${TMP}`);
