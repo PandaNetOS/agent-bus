@@ -258,7 +258,7 @@ export function buildPrompt(msg, me, all = []) {
  * @param {number} [opts.intervalMs]
  * @param {string} [opts.workdir]
  */
-export async function runDriver({ name, createSession, intervalMs = 1500, workdir = ROOT, once = false, replay = false }) {
+export async function runDriver({ name, createSession, intervalMs = 1500, workdir = ROOT, once = false, replay = false, pulseMs = 5000 }) {
   ensureConfig();
   const cursor = loadCursor(name);
   trimStream(name);
@@ -281,8 +281,11 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
   let onceDone = false;   // --once 模式下：本轮已处理（含主动 [SKIP]）过一条
   let currentEmit = () => {};
 
-  process.on('SIGINT', () => { stopped = true; });
-  process.on('SIGTERM', () => { stopped = true; });
+  // 匿名监听器每调用一次 runDriver 就多两个，验收里连续跑十几个就触发
+  // MaxListenersExceededWarning。留个引用，退出时摘掉。
+  const onStop = () => { stopped = true; };
+  process.on('SIGINT', onStop);
+  process.on('SIGTERM', onStop);
 
   const ensureSession = async () => {
     if (session) return session;
@@ -366,7 +369,18 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
 
     try {
       const s = await ensureSession();
-      const reply = await s.ask(buildPrompt(msg, name, all));
+      // 长任务期间也要报活。心跳原来只在投喂前写一次，而一轮 LLM 可能跑几十秒，
+      // busd 判在线的窗口是 8 秒 —— 正在思考的 agent 在界面上看起来像死了，
+      // 于是人只能挨个问「你在线吗」。thinking 状态本来就在，缺的是持续刷新。
+      // ensureSession() 建会话时会把状态改回 idle，所以这里再写一次。
+      heartbeat(name, { state: 'thinking', currentSeq: msg.seq });
+      const pulse = setInterval(() => heartbeat(name, { state: 'thinking', currentSeq: msg.seq }), pulseMs);
+      let reply;
+      try {
+        reply = await s.ask(buildPrompt(msg, name, all));
+      } finally {
+        clearInterval(pulse);
+      }
       const text = String(reply || '').trim().slice(0, MAX_REPLY_CHARS) || '(无文本输出)';
 
       // 群聊的关键出口：agent 自己决定不说话。
@@ -419,6 +433,8 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
 
   try { session?.close?.(); } catch {}
   heartbeat(name, { state: 'off', note: 'stopped' });
+  process.off('SIGINT', onStop);
+  process.off('SIGTERM', onStop);
 }
 
 function log(name, s) {

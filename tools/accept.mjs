@@ -619,6 +619,51 @@ section('12. 群聊语义：独立个体，各说各的');
   ok("groupChat:false → 已被抢答的不投喂",
     gates.gate(b, { me: 'hermes', all: [b], config: cfgOld, claimed: new Set([1]) }).reason === 'claimed');
 }
+// ---------------- 13. 心跳：长任务期间不能显示离线 ----------------
+section('13. 长任务期间心跳要续');
+{
+  // 心跳原来只在投喂前写一次，而一轮 LLM 可能跑几十秒。busd 判在线的窗口
+  // 是 8 秒，于是正在思考的 agent 在界面上看起来像死了 —— 人只能挨个问
+  // 「你在线吗」。这条用例锁住：ask 期间心跳必须持续刷新。
+  const { runDriver } = await import("../drivers/driver.mjs");
+  fs.writeFileSync(path.join(TMP, "room.jsonl"), "", "utf8");
+  fs.rmSync(path.join(TMP, ".claims.jsonl"), { force: true });
+  fs.rmSync(path.join(TMP, ".cursor-hermes.json"), { force: true });
+  writeConfig({ autoChat: true, maxHop: 3, pausedUntil: 0, pauseReason: '', hopReset: {}, groupChat: true });
+
+  const hb = path.join(TMP, ".heartbeat-hermes.json");
+  const quiet = async () => ({ ask: async () => "x", close: () => {} });
+  // 第一次只建基线（房间是空的，没有待处理消息）
+  await runDriver({ name: 'hermes', createSession: quiet, once: true, intervalMs: 10, pulseMs: 40 });
+
+  append({ from: 'human', text: '慢慢想', to: '*', mentions: '*', via: 'human', thread: 't-hb' });
+
+  let before = 0;
+  let during = null;
+  const slow = async () => ({
+    ask: async () => {
+      before = JSON.parse(fs.readFileSync(hb, "utf8")).ts;
+      await new Promise((r) => setTimeout(r, 300));
+      during = JSON.parse(fs.readFileSync(hb, "utf8"));
+      return "想完了";
+    },
+    close: () => {},
+  });
+  await runDriver({ name: 'hermes', createSession: slow, once: true, intervalMs: 10, pulseMs: 40 });
+
+  ok("ask 期间心跳有刷新（不是只在投喂前写一次）",
+    during && during.ts > before, `before=${before} during=${during && during.ts}`);
+  ok("ask 期间状态是 thinking", during && during.state === "thinking", JSON.stringify(during));
+
+  // 跨文件不变量：心跳间隔必须小于 busd 判在线的窗口，否则会闪成离线
+  const drvSrc = fs.readFileSync(path.join(REPO, "drivers/driver.mjs"), "utf8");
+  const busdSrc = fs.readFileSync(path.join(REPO, "webui/busd.mjs"), "utf8");
+  const pm = drvSrc.match(/pulseMs = (\d+)/);
+  const wm = busdSrc.match(/Date\.now\(\) - o\.ts < (\d+)/);
+  ok("心跳间隔 < 判在线窗口", pm && wm && Number(pm[1]) < Number(wm[1]),
+    `pulse=${pm && pm[1]} window=${wm && wm[1]}`);
+}
+
 console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====`);
 console.log(`验收 runtime: ${TMP}`);
 process.exit(fail ? 1 : 0);
