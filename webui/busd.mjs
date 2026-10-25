@@ -15,6 +15,8 @@ import { ROOT, readAll, append, readCeo, writeCeo } from '../lib/bus.mjs';
 import { readConfig, writeConfig, ensureConfig } from '../lib/config.mjs';
 import { breakerState, names, gate, MAX_HOP_DEFAULT, BROADCAST } from '../lib/gates.mjs';
 
+const CLAIMS_PATH = path.join(ROOT, '.claims.jsonl');
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -170,8 +172,85 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { messages: sel, count: all.length, truncated: unread.length > sel.length });
     }
 
-    if (req.method === 'GET' && p === '/api/state') {
+    /**
+ * 一条消息为什么没人接？把六道闸对每个成员跑一遍，返回人类可读的原因。
+ *
+ * 没有这个，用户发完消息看到的就是「石沉大海」——实际上可能是 autoChat 没开、
+ * 被反循环闸拦了、被抢答了、或者 @ 了一个没有 driver 的 agent（比如 dsh）。
+ * 这些在界面上完全不可见，只能去翻日志。
+ */
+function why(m, all, cfg) {
+  const claimed = new Set(
+    fs.existsSync(CLAIMS_PATH)
+      ? fs.readFileSync(CLAIMS_PATH, 'utf8').split('\n').filter(Boolean)
+        .map((l) => { try { return JSON.parse(l).seq; } catch { return null; } }).filter((x) => x != null)
+      : [],
+  );
+  const out = [];
+  for (const me of MEMBERS) {
+    // 每个成员的 consumed 不同，游标是 driver 自己维护的
+    let consumed = new Set();
+    let baseline = 0;
+    const cp = path.join(ROOT, `.cursor-${me}.json`);
+    try {
+      const c = JSON.parse(fs.readFileSync(cp, 'utf8'));
+      consumed = new Set(c.consumed || []);
+      baseline = c.baseline ?? 0;
+    } catch { /* 没游标文件 = 这个 driver 从没启动过 */ }
+    const g = gate(m, { me, all, consumed, config: cfg, claimed });
+    out.push({
+      agent: me,
+      ok: g.ok,
+      reason: g.reason || 'ok',
+      detail: g.detail || '',
+      hasDriver: fs.existsSync(path.join(ROOT, `.heartbeat-${me}.json`)),
+      belowBaseline: m.seq <= baseline,
+    });
+  }
+  return out;
+}
+
+/** 人类可读的一句话解释 */
+const WHY_TEXT = {
+  self: '自己发的',
+  'not-named': '没点名它',
+  consumed: '它已经回过这条',
+  claimed: '群里已有人抢答',
+  answered: '群里已有人回过',
+  breaker: '熔断中',
+  'hop-limit': '跳数到顶',
+  loop: '同样的话说过两次，判为循环',
+};
+
+function diagnose(m, all, cfg) {
+  const rows = why(m, all, cfg);
+  const live = rows.filter((r) => r.hasDriver);
+  const will = live.filter((r) => r.ok);
+  if (!m.via || m.via === 'human') {
+    if (!cfg.autoChat) return '自动对话总开关是关的，没人会被投喂';
+  }
+  if (will.length) return '';
+  if (!live.length) return '没有任何 driver 在跑（左栏成员卡都是灰的）';
+  const uniq = [...new Set(live.map((r) => r.reason))];
+  const named = m.to && m.to !== '*';
+  if (named && uniq.includes('not-named')) {
+    return `@${m.to} 没有 driver 在接（只有 ${live.map((r) => r.agent).join(' / ')} 在线）`;
+  }
+  return uniq.map((r) => WHY_TEXT[r] || r).join('；');
+}
+
+if (req.method === 'GET' && p === '/api/state') {
       return json(res, 200, buildState());
+    }
+
+    // 这条消息为什么没人回？给界面用，省得用户对着「石沉大海」猜
+    if (req.method === 'GET' && p === '/api/why') {
+      const seq = Number(url.searchParams.get('seq') || 0);
+      const all = readAll();
+      const m = all.find((x) => x.seq === seq);
+      if (!m) return json(res, 404, { error: 'no such seq' });
+      const cfg = readConfig();
+      return json(res, 200, { seq, text: diagnose(m, all, cfg), agents: why(m, all, cfg) });
     }
 
     if (req.method === 'GET' && p === '/api/events') {

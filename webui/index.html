@@ -137,6 +137,14 @@
     border: 1px solid #4b2d6b; border-radius: 5px; padding: 1px 7px; cursor: pointer;
   }
   .release:hover { background: #4b2d6b; }
+  /* 发出去没人接时的状态条：先「等回复」，超时后变成原因 */
+  .pending {
+    font-size: 10.5px; color: var(--dim); margin-top: 3px;
+    display: flex; gap: 5px; align-items: center;
+  }
+  .row.mine .pending { flex-direction: row-reverse; }
+  .pending.wait { color: var(--yellow); }
+  .pending.note { color: var(--yellow); }
   .typing { display: flex; gap: 3px; align-items: center; padding: 9px 11px; }
   .typing i {
     width: 5px; height: 5px; border-radius: 50%; background: var(--dim);
@@ -151,6 +159,7 @@
     font-size: 11px; color: var(--cyan); margin-bottom: 6px; min-height: 15px;
   }
   #composer .tip.named { color: var(--purple); }
+  #composer .tip.warn { color: var(--yellow); }
   #composer .row { display: flex; gap: 8px; align-items: flex-end; }
   #say {
     flex: 1; min-height: 42px; max-height: 150px; resize: vertical;
@@ -318,6 +327,19 @@ function renderConfig() {
   $('#autoSw').className = 'sw' + (c.autoChat ? ' on' : '');
   $('#maxHop').value = c.maxHop ?? 3;
   $('#autoMeta').textContent = c.autoChat ? '开：点名的 agent 会自动回复' : '关：只有人说话才投喂';
+  // 开了开关但没人能答，是最容易让人以为「坏了」的状态：开关看着是开的，
+  // 消息却石沉大海。这里直接把原因写在开关底下。
+  const live = (STATE?.members || []).filter((m) => m.online);
+  if (c.autoChat && !live.length) {
+    $('#autoMeta').textContent = '开关开着，但没有 driver 在跑 → 没人会回';
+    $('#autoMeta').style.color = 'var(--yellow)';
+  } else if (c.autoChat) {
+    $('#autoMeta').textContent = `开：${live.map((m) => m.name).join(' / ')} 会抢着回`;
+    $('#autoMeta').style.color = '';
+  } else {
+    $('#autoMeta').textContent = '关：发出去不会有人回';
+    $('#autoMeta').style.color = '';
+  }
   const bb = $('#breakerBox');
   if (STATE?.paused) {
     bb.style.display = '';
@@ -420,11 +442,55 @@ function msgNode(m, prev) {
   }
   meta.append(el('span', null, '#' + m.seq));
   wrap.append(meta);
+  if (mine) { const p = pendingNode(m); if (p) wrap.append(p); }
   row.append(wrap);
   return row;
 }
 
-/** 谁在思考：按 driver 心跳里的 currentSeq 显示「正在输入」 */
+/**
+ * 我发的人肉消息：没人回就给个状态。
+ * 没这个的话用户看到的就是「发出去、石沉大海」——实际可能是总开关没开、
+ * 被反循环闸拦了（连发两句一样的话）、或者 @ 了个没 driver 的 agent。
+ */
+const PENDING = new Map();   // seq -> 'wait' | 'note'
+const PENDING_TXT = new Map();
+const PENDING_WAIT_MS = 15000;   // 15 秒还没人接，去问后端为什么
+
+function pendingNode(m) {
+  const st = PENDING.get(m.seq);
+  if (!st) return null;
+  const d = el('div', 'pending ' + (st === 'wait' ? 'wait' : 'note'));
+  d.textContent = st === 'wait'
+    ? '等待回复…'
+    : (PENDING_TXT.get(m.seq) || '没人回');
+  return d;
+}
+
+async function refreshPending(seq) {
+  if (PENDING.get(seq) !== 'wait') return;
+  PENDING.set(seq, 'note');
+  try {
+    const r = await (await fetch(`/api/why?seq=${seq}`)).json();
+    PENDING_TXT.set(seq, r.text || '没人回（原因未知）');
+  } catch { PENDING_TXT.set(seq, '查不到原因'); }
+  renderMsgs();
+}
+
+/** 扫一遍我发的、还没人回的消息，登记待观察 */
+function scanPending() {
+  const answered = new Set(MSGS.filter((m) => m.reply_to).map((m) => m.reply_to));
+  const cutoff = Date.now() - 600000;   // 只看 10 分钟内的，别把老消息全标黄
+  for (const m of MSGS) {
+    if (m.from !== 'human') continue;
+    if (m.via && m.via !== 'human') continue;
+    if (answered.has(m.seq)) { PENDING.delete(m.seq); continue; }
+    if (Date.parse(m.ts) < cutoff) continue;
+    if (PENDING.has(m.seq)) continue;
+    PENDING.set(m.seq, 'wait');
+    setTimeout(() => refreshPending(seqOf(m)), PENDING_WAIT_MS);
+  }
+}
+const seqOf = (m) => m.seq;
 function typingNode() {
   const busy = (STATE?.members || []).filter((m) => m.state === 'thinking' && m.currentSeq);
   const frag = document.createDocumentFragment();
@@ -466,6 +532,7 @@ function renderMsgs() {
     prevMsg = m;
   }
   box.append(typingNode());
+  scanPending();
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
 
@@ -554,7 +621,16 @@ function updateTip() {
     return;
   }
   tip.className = 'tip';
-  tip.textContent = '发给全体 · Hermes / OpenCode 谁先抢到谁回';
+  const live = (STATE?.members || []).filter((x) => x.online).map((x) => x.name);
+  if (!STATE?.config?.autoChat) {
+    tip.textContent = '⚠ 总开关关着，发出去不会有人回（左栏打开「总开关」）';
+    tip.className = 'tip warn';
+  } else if (!live.length) {
+    tip.textContent = '⚠ 没有 driver 在跑，发出去不会有人回';
+    tip.className = 'tip warn';
+  } else {
+    tip.textContent = `发给全体 · ${live.join(' / ')} 谁先抢到谁回`;
+  }
 }
 
 async function send() {
