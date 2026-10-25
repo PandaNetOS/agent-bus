@@ -334,7 +334,9 @@ function renderConfig() {
     $('#autoMeta').textContent = '开关开着，但没有 driver 在跑 → 没人会回';
     $('#autoMeta').style.color = 'var(--yellow)';
   } else if (c.autoChat) {
-    $('#autoMeta').textContent = `开：${live.map((m) => m.name).join(' / ')} 会抢着回`;
+    // 群聊模式下三个人都看得到，各自决定说不说 —— 不是「抢」。
+    const mode = c.groupChat === false ? '会抢着回' : '各自决定说不说';
+    $('#autoMeta').textContent = `开：${live.map((m) => m.name).join(' / ')} ${mode}`;
     $('#autoMeta').style.color = '';
   } else {
     $('#autoMeta').textContent = '关：发出去不会有人回';
@@ -562,7 +564,7 @@ function renderEvents() {
 }
 
 function renderAll() { renderMembers(); renderCeo(); renderConfig(); renderTasks(); renderCounts(); renderMsgs();
-  // 成员上下线会变（driver 是独立进程），输入框提示里的「谁会抢着回」
+  // 成员上下线会变（driver 是独立进程），输入框提示里的「谁会看到」
   // 也得跟着变，否则 driver 起来了界面上还印着旧的名单。
   // updateTip 只读输入框当前值重算，幂等，不会打断正在打字的人。
   updateTip();
@@ -622,7 +624,7 @@ function updateTip() {
   }
   // 空输入和不带 @ 的输入走同一条路。
   // 之前空输入直接写死「Hermes / OpenCode」，dsh 接进来以后这里就成了
-  // 界面上唯一还没反映新成员的地方：三个人抢答，提示里却只印两个。
+  // 界面上唯一还没反映新成员的地方：三个人都在群里，提示里却只印两个。
   // 这里同样要报开关关 / 没人跑 —— 空着的时候正是用户最该看到预警的时刻。
   tip.className = 'tip';
   const live = (STATE?.members || []).filter((x) => x.online).map((x) => x.name);
