@@ -184,13 +184,21 @@ function trimStream(name, keep = 400) {
   } catch {}
 }
 
+/** 这条是不是人发的（不是 agent 之间的话） */
+function isHumanMsg(msg) {
+  return !msg.from || String(msg.from).toLowerCase() === 'human' || msg.via === 'human';
+}
+
 /** 把总线消息包成给 agent 的指令 */
 /**
  * 投喂给 agent 的提示词。
  *
- * 关键设计：**它可以选择沉默。** 回复以 [SKIP] 开头表示「这话我不接」，
- * driver 收到就不发消息。没有这个出口，群聊模式下三个人会对每条群消息
- * 各说一遍「收到」，那比只有一个回答更糟。
+ * 关键设计：**它可以选择沉默**，但沉默的边界是「同伴之间」，不是「人说话」。
+ * 回复以 [SKIP] 开头表示「这话我不接」，driver 收到就不发消息。没有这个出口，
+ * 群聊模式下三个人会对每条群消息各说一遍「收到」，那比只有一个回答更糟。
+ *
+ * 反过来，如果对人也能沉默，就变成「我在群里发消息没有回复」——
+ * 实测三条全跳过一句「早上好」。所以 human 的消息在没人接过时必须接。
  *
  * 同理，agent 得知道同伴的存在 —— 不然它不知道该不该接、该不该转给别人。
  * 带上最近几句对话，否则它只看得到一条凭空冒出来的话，那不是聊天。
@@ -211,11 +219,21 @@ export function buildPrompt(msg, me, all = []) {
     : "  （暂无）";
 
   const named = !!(msg.to && msg.to !== "*");
+  // 「人说话必须有人接」是硬规则：group chat 里最糟的不是三个人抢话，
+  // 是人问一句、三个人全用 [SKIP] 装死（实测 #143「早上好」三条全跳）。
+  const fromHuman = isHumanMsg(msg);
+  const alreadyAnswered = (all || []).filter((m) => m.reply_to === msg.seq);
 
   const rules = [
-    "1. **你可以选择不说话。** 觉得没必要接、别人已经说清楚了、纯粹是寒暄、",
-    "   或者你没什么可补充的 —— 就只回复 [SKIP]，一个字都不要多写。",
-    "   沉默是正当的。群里有三个人，不需要人人都回每一句。",
+    fromHuman
+      ? (alreadyAnswered.length
+        ? `1. 这条来自 human，群里已经有人回过了（#${alreadyAnswered.map((m) => m.seq).join(" / #")}）。`
+          + "\n   你要么补充、要么反对，要么 [SKIP] —— 别把别人说过的再说一遍。"
+        : "1. **这条来自 human，现在还没有人回。你不能沉默。**"
+          + "\n   哪怕只是一句「早上好」，也回一句「早」。人说话没人应，是这个群最糟的样子。"
+          + "\n   觉得这事不用做，就说「不用做」并给一句理由 —— 但不许消失。")
+      : "1. 这条来自同伴。客套、互相确认、别人已经说清楚了 —— 都可以只回 [SKIP]。"
+        + "\n   沉默是正当的：群里有三个人，不需要人人都接同伴的每一句。",
     "",
     "2. 要说话就直说，300 字内。说你的看法、结论、下一步。",
     "   不要复述指令，不要说「收到」，不要拍马屁。",
@@ -247,7 +265,13 @@ export function buildPrompt(msg, me, all = []) {
     "决定你要不要说话。规则：",
     ...rules,
     "",
-    named ? "这条是点名你的，一般来说你该回应。" : "这条是群里广播，自己判断该不该接。",
+    named
+      ? "这条是点名你的，一般来说你该回应。"
+      : (fromHuman
+        ? (alreadyAnswered.length
+          ? "这条是群里广播，已经有人接过了 —— 按需补充。"
+          : "这条是群里广播，**还没人接** —— 你得说点什么。")
+        : "这条是群里广播，自己判断该不该接。"),
   ].join("\n");
 }
 
@@ -385,6 +409,17 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
       let reply;
       try {
         reply = await s.ask(buildPrompt(msg, name, all));
+        // 人说话不许被跳过。实测 #143「早上好」三个人全回 [SKIP]，群里
+        // 就变成「我发消息没人理」。只追问一次：再问也不会让它开口。
+        const skipped = /^\[SKIP\]/i.test(String(reply || "").trim());
+        if (skipped && isHumanMsg(msg) && !all.some((m) => m.reply_to === msg.seq)) {
+          log(name, `#${msg.seq} 对 human 的消息选择了沉默，追问一次`);
+          reply = await s.ask(
+            buildPrompt(msg, name, all)
+            + "\n\n【必须回】你刚才选择了沉默，但这条是 human 的消息，群里还没有人回。"
+            + "现在回一句，不要 [SKIP]。",
+          );
+        }
       } finally {
         clearInterval(pulse);
       }

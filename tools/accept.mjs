@@ -679,6 +679,87 @@ section('13. 长任务期间心跳要续');
     `pulse=${pm && pm[1]} window=${wm && wm[1]}`);
 }
 
+// ---------------- 14. 人说话必须有人接 ----------------
+section('14. 人说话不许被静默吞掉');
+{
+  // 实测事故：human 在群里发「早上好」两次，三条全回 [SKIP]，第二次还被
+  // 反循环闸判成 loop —— 界面上只剩一句「判为循环」。群里看起来就是没人。
+  // 这组用例钉死三件事：
+  //   1. 反循环闸只管 agent 之间的话，人重复发不算循环
+  //   2. prompt 对 human 的消息不给沉默出口
+  //   3. 诊断要能说出「它们主动选择了沉默」，而不是谎称「已经回过」
+  const { buildPrompt } = await import("../drivers/driver.mjs");
+  const { makeDiagnose } = await import("../lib/diagnose.mjs");
+  const cfg = { autoChat: true, maxHop: 3, hopReset: {}, groupChat: true };
+
+  const mkM = (o) => ({ ts: new Date().toISOString(), kind: "msg", task: 0, thread: "t1",
+    reply_to: 0, mentions: "", hop: 0, via: "human", ...o });
+
+  // A. 人重复发同一句：不算循环
+  const hello1 = mkM({ seq: 1, from: "human", to: "*", mentions: "*", text: "早上好" });
+  const hello2 = mkM({ seq: 2, from: "human", to: "*", mentions: "*", text: "早上好" });
+  ok("人重复发同一句 → 仍然投喂（不是循环）",
+    gates.gate(hello2, { me: "hermes", all: [hello1, hello2], config: cfg }).ok);
+
+  // B. agent 之间重复：仍然判循环
+  const a1 = mkM({ seq: 3, from: "dsh", to: "*", mentions: "*", text: "收到", hop: 1, via: "driver:dsh" });
+  const a2 = mkM({ seq: 4, from: "dsh", to: "*", mentions: "*", text: "收到", hop: 1, via: "driver:dsh" });
+  ok("agent 重复发同一句 → 判循环",
+    gates.gate(a2, { me: "hermes", all: [a1, a2], config: cfg }).reason === "loop");
+
+  // C. prompt：human 的消息、还没人回 → 明确不许沉默
+  const p1 = buildPrompt(hello1, "hermes", [hello1]);
+  ok("prompt 对没人回的 human 消息说「不能沉默」", p1.includes("不能沉默"), p1.slice(0, 160));
+  ok("prompt 不再把「寒暄」当沉默理由", !p1.includes("纯粹是寒暄"));
+
+  // D. prompt：已经有人回过 → 允许跳过，但不许重复
+  const helloReply = mkM({ seq: 5, from: "dsh", to: "human", hop: 1, via: "driver:dsh", reply_to: 1, text: "早" });
+  const p2 = buildPrompt(hello1, "hermes", [hello1, helloReply]);
+  ok("prompt 对已有人回的 human 消息允许跳过", p2.includes("已经有人回过"), p2.slice(0, 160));
+
+  // E. prompt：agent 之间仍然可以沉默
+  const peerMsg = mkM({ seq: 6, from: "dsh", to: "hermes", mentions: "hermes", hop: 1, via: "driver:dsh", text: "收到" });
+  const p3 = buildPrompt(peerMsg, "hermes", [peerMsg]);
+  ok("prompt 对同伴的消息允许 [SKIP]", p3.includes("[SKIP]"), p3.slice(0, 160));
+
+  // F. 诊断：三条都主动沉默 → 说「主动选择了沉默」，不许谎称「已经回过」
+  const D = makeDiagnose({ root: TMP, members: ["dsh", "hermes", "opencode"] });
+  const MEMBS = ["dsh", "hermes", "opencode"];
+  const putRoom = (msgs) => fs.writeFileSync(path.join(TMP, "room.jsonl"),
+    msgs.map((m) => JSON.stringify(m)).join("\n") + "\n", "utf8");
+  const putStream = (n, seq, type) => fs.writeFileSync(path.join(TMP, `stream-${n}.jsonl`),
+    JSON.stringify({ ts: Date.now(), seq, type }) + "\n", "utf8");
+  const setAll = (seq, type) => {
+    for (const n of MEMBS) {
+      fs.writeFileSync(path.join(TMP, `stream-${n}.jsonl`), "", "utf8");
+      fs.writeFileSync(path.join(TMP, `.cursor-${n}.json`),
+        JSON.stringify({ consumed: [seq], lastSeq: seq, baseline: 0 }), "utf8");
+      fs.writeFileSync(path.join(TMP, `.heartbeat-${n}.json`),
+        JSON.stringify({ name: n, ts: Date.now(), state: "idle" }), "utf8");
+      putStream(n, seq, type);
+    }
+    fs.rmSync(path.join(TMP, ".claims.jsonl"), { force: true });
+  };
+
+  putRoom([hello1]);
+  setAll(1, "skipped");
+  {
+    const all = readAll();
+    const t = D.diagnose(all[0], all, cfg);
+    ok("三条都沉默时如实说「主动选择了沉默」", t.includes("主动选择了沉默"), t);
+    ok("不再谎称「它已经回过这条」", !t.includes("已经回过这条"), t);
+  }
+
+  // G. 点名 + 沉默：说清是它自己不接，不是没 driver
+  putRoom([mkM({ seq: 2, from: "human", to: "hermes", mentions: "hermes", text: "hermes 在吗" })]);
+  setAll(2, "skipped");
+  {
+    const all = readAll();
+    const t = D.diagnose(all[0], all, cfg);
+    ok("点名 + 沉默 → 说它自己选择不说话", t.includes("@hermes 在线") && t.includes("选择不说话"), t);
+  }
+}
+
 console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====`);
 console.log(`验收 runtime: ${TMP}`);
 process.exit(fail ? 1 : 0);
