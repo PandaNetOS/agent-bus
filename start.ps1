@@ -27,21 +27,21 @@ $env:AGENT_BUS_ROOT = $Root
 $env:PORT = "$Port"
 
 function Start-Bg {
-  param([string]$Name, [string[]]$Args)
+  param([string]$Name, [string[]]$ArgList)
   $out = Join-Path $Root "$Name.log"
   $err = Join-Path $Root "$Name.err.log"
-  $p = Start-Process -FilePath 'node' -ArgumentList $Args -WorkingDirectory $Repo `
+  $p = Start-Process -FilePath 'node' -ArgumentList $ArgList -WorkingDirectory $Repo `
         -WindowStyle Hidden -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
   Set-Content -Path (Join-Path $Root ".pid-$Name") -Value $p.Id -Encoding ascii
   Write-Output ("  {0,-16} pid={1}  日志 {2}" -f $Name, $p.Id, $out)
 }
 
 Write-Output "agent-bus root: $Root"
-Start-Bg -Name 'busd' -Args @('webui/busd.mjs')
+Start-Bg -Name 'busd' -ArgList @('webui/busd.mjs')
 
 if ($WithDrivers) {
-  Start-Bg -Name 'driver-hermes' -Args @('drivers/hermes.mjs')
-  Start-Bg -Name 'driver-opencode' -Args @('drivers/opencode.mjs')
+  Start-Bg -Name 'driver-hermes' -ArgList @('drivers/hermes.mjs')
+  Start-Bg -Name 'driver-opencode' -ArgList @('drivers/opencode.mjs')
 }
 
 Write-Output ""
