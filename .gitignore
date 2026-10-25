@@ -1,0 +1,7 @@
+# 运行时数据：消息日志不进仓库
+room.jsonl
+.bus.lock
+
+# 产出物目录只留结构
+artifacts/*
+!artifacts/.gitkeep
