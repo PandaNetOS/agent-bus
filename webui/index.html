@@ -247,12 +247,12 @@
   </div>
   <div id="msgs" class="col"></div>
   <div id="composer">
-    <div id="composertip" class="tip">发给全体 · 谁先抢到谁回</div>
+    <div id="composertip" class="tip">发给全体 · 三个人都看得到，各自决定说不说</div>
     <div class="row">
       <textarea id="say" placeholder="说话…（不点名 = @全体；@hermes 只给它，@opencode 转交）"></textarea>
       <button id="send">发送</button>
     </div>
-    <div id="hint">回车发送 · Shift+回车换行 · 带 @名字 定向点名，不带则 @全体（一人回复）· hop 到顶的消息标黄，点「放行」继续</div>
+    <div id="hint">回车发送 · Shift+回车换行 · 带 @名字 定向点名，不带则 @全体（三个人各自决定说不说，不想接的会沉默）· hop 到顶的消息标黄，点「放行」继续</div>
   </div>
 </main>
 
@@ -632,8 +632,12 @@ function updateTip() {
   } else if (!live.length) {
     tip.textContent = '⚠ 没有 driver 在跑，发出去不会有人回';
     tip.className = 'tip warn';
-  } else {
+  } else if (STATE?.config?.groupChat === false) {
+    // 旧行为：三个人抢一个名额
     tip.textContent = `发给全体 · ${live.join(' / ')} 谁先抢到谁回`;
+  } else {
+    // 群聊：每个人都看得到，各自决定说不说（沉默由 agent 自己用 [SKIP] 表达）
+    tip.textContent = `发给全体 · ${live.join(' / ')} 都看得到，各自决定说不说`;
   }
 }
 
