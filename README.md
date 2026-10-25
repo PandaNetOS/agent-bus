@@ -288,6 +288,11 @@ driver 在 `ask` 和建会话期间都每 5 秒重写一次心跳（`state: 'thi
 分成 `replied`（真回过）和 `skipped`（自己选择不说话）；三个人都跳过时，
 整句诊断说「N 个 agent 都主动选择了沉默」，不再冒充成「回过」。
 
+两个判据不能混用：**「回过」看日志里有没有 `reply_to == 这条` 的回复**，
+**「沉默」看 `stream-<名>.jsonl` 里有没有 `skipped` 事件**。
+`stream` 里的 `replied` 事件记的是**回复那条**的 seq（`driver.mjs:453` 用的是
+`out.seq`），拿它比对被回的 seq 永远查不到 —— 实测 `#145` 就踩了这个坑。
+
 ### maxHop=3 的 off-by-one 之争：结论是「没有」
 
 dsh 曾在这里写过一节，主张 `maxHop=3` 存在 off-by-one、hop=3 的消息根本写不出来。

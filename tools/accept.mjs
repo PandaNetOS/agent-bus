@@ -758,6 +758,28 @@ section('14. 人说话不许被静默吞掉');
     const t = D.diagnose(all[0], all, cfg);
     ok("点名 + 沉默 → 说它自己选择不说话", t.includes("@hermes 在线") && t.includes("选择不说话"), t);
   }
+
+  // H. 真回过：以日志里的 reply_to 为准，不看 stream 的 replied 事件。
+  //    stream 里的 replied 记的是「回复那条」的 seq（driver.mjs:453 用 out.seq），
+  //    拿它比对被回的 seq 永远查不到 —— 这是实测 #145 暴露的第二个坑。
+  putRoom([hello1,
+    mkM({ seq: 9, from: "dsh", to: "human", hop: 1, via: "driver:dsh", reply_to: 1, text: "早" })]);
+  for (const n of MEMBS) {
+    fs.writeFileSync(path.join(TMP, `stream-${n}.jsonl`),
+      JSON.stringify({ ts: Date.now(), seq: 9, type: "replied", hop: 1 }) + "\n", "utf8");
+    fs.writeFileSync(path.join(TMP, `.cursor-${n}.json`),
+      JSON.stringify({ consumed: [1], lastSeq: 1, baseline: 0 }), "utf8");
+    fs.writeFileSync(path.join(TMP, `.heartbeat-${n}.json`),
+      JSON.stringify({ name: n, ts: Date.now(), state: "idle" }), "utf8");
+  }
+  {
+    const all = readAll();
+    const rows = D.why(all[0], all, cfg);
+    const dshRow = rows.find((r) => r.agent === "dsh");
+    const hermesRow = rows.find((r) => r.agent === "hermes");
+    ok("回过的那位 → 判为 replied", dshRow.reason === "replied", JSON.stringify(dshRow));
+    ok("没开口的那位 → 不冒充 replied", hermesRow.reason !== "replied", JSON.stringify(hermesRow));
+  }
 }
 
 console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====`);
