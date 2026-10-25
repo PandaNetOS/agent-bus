@@ -2,6 +2,18 @@
 room.jsonl
 .bus.lock
 ceo.txt
+hub-config.json
+
+# driver 运行状态
+.cursor-*.json
+.heartbeat-*.json
+stream-*.jsonl
+.cancel-*
+
+# 进程 pid 与日志
+.pid-*
+*.log
+*.err.log
 
 # 产出物目录只留结构
 artifacts/*

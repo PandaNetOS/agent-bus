@@ -5,12 +5,21 @@
 .DESCRIPTION
   一个 append-only 的 JSONL 日志 + 文件锁。任何能跑 pwsh 的进程都能读写。
 
+  v2 新增五个字段（全部可选，旧调用不受影响）：
+    -Thread    对话线程 id（同一轮协作的多条消息共用）
+    -ReplyTo   引用的 seq
+    -Mentions  显式点名的 agent，逗号分隔（如 "opencode,hermes"）
+    -Hop       自动对话跳数，driver 用它防死循环
+    -Via       谁投喂的：human（人说的）或 driver:<name>（agent 自动说的）
+
 .EXAMPLE
   pwsh -File bus.ps1 post -From dsh -Text "开始修 Hindsight bank_id"
+  pwsh -File bus.ps1 post -From hermes -To opencode -Mentions opencode -Thread t-7 -ReplyTo 55 -Hop 1 -Via driver:hermes -Text "锁那段我看过了"
   pwsh -File bus.ps1 read -Since 0 -Limit 20
+  pwsh -File bus.ps1 read -Since 55 -Json
   pwsh -File bus.ps1 who
   pwsh -File bus.ps1 claim -From opencode -Task 3
-  pwsh -File bus.ps1 done -From opencode -Task 3 -Text "改完了"
+  pwsh -File bus.ps1 done -From opencode -Task 3 -To dsh -Text "改完了"
 #>
 [CmdletBinding()]
 param(
@@ -25,7 +34,17 @@ param(
   [int]$Limit = 30,
   [int]$Task = 0,
   [string]$Kind = 'msg',      # msg | task | claim | done | note
-  [string]$Root = 'D:\PNOS\agent-bus'
+  [string]$Root = 'D:\PNOS\agent-bus',
+
+  # ---------- v2 ----------
+  [string]$Thread = '',
+  [int]$ReplyTo = 0,
+  # 逗号分隔，存成字符串而不是数组：PS 5.1 的 ConvertTo-Json 会把单元素数组
+  # 退化成裸字符串，调用方解析时类型不稳定。字符串 split(',') 两边都干净。
+  [string]$Mentions = '',
+  [int]$Hop = 0,
+  [string]$Via = 'human',
+  [switch]$Json              # read/tail 输出原始 JSON，给 driver 和 webui 解析
 )
 
 $ErrorActionPreference = 'Stop'
@@ -89,6 +108,13 @@ function Get-Messages {
       $o = $line | ConvertFrom-Json
       $n++
       if (-not $o.PSObject.Properties['seq']) { $o | Add-Member -NotePropertyName seq -NotePropertyValue $n -Force }
+      # v2 字段补默认值：老消息没有这些属性，读取方不必为缺字段写分支。
+      foreach ($p in @('thread','reply_to','mentions','hop','via')) {
+        if (-not $o.PSObject.Properties[$p]) {
+          $dflt = if ($p -eq 'via') { 'human' } elseif ($p -eq 'thread' -or $p -eq 'mentions') { '' } else { 0 }
+          $o | Add-Member -NotePropertyName $p -NotePropertyValue $dflt -Force
+        }
+      }
       $out.Add($o)
     } catch {
       # 坏行跳过，不阻塞整体读取
@@ -119,13 +145,18 @@ function Add-Message {
     }
 
     $obj = [ordered]@{
-      seq  = $nextSeq
-      ts   = (Get-Date).ToString('o')
-      from = $Fields.from
-      kind = $Fields.kind
-      to   = $Fields.to
-      task = $Fields.task
-      text = $Fields.text
+      seq      = $nextSeq
+      ts       = (Get-Date).ToString('o')
+      from     = $Fields.from
+      kind     = $Fields.kind
+      to       = $Fields.to
+      task     = $Fields.task
+      text     = $Fields.text
+      thread   = $Fields.thread
+      reply_to = $Fields.reply_to
+      mentions = $Fields.mentions
+      hop      = $Fields.hop
+      via      = $Fields.via
     }
     $json = ($obj | ConvertTo-Json -Compress -Depth 5)
     [System.IO.File]::AppendAllText($Room, $json + "`n", $Utf8)
@@ -138,8 +169,10 @@ switch ($Command) {
 
   'post' {
     if ([string]::IsNullOrWhiteSpace($Text)) { throw "post: 需要 -Text" }
-    $m = Add-Message @{ from=$From; kind=$Kind; to=$To; task=0; text=$Text }
-    Write-Output ("[#{0}] {1} → {2}" -f $m.seq, $m.from, $m.text)
+    $m = Add-Message @{ from=$From; kind=$Kind; to=$To; task=0; text=$Text
+                        thread=$Thread; reply_to=$ReplyTo; mentions=$Mentions
+                        hop=$Hop; via=$Via }
+    Write-Output (("[#{0}] {1} → {2}" -f $m.seq, $m.from, $m.text))
   }
 
   'task' {
@@ -151,23 +184,29 @@ switch ($Command) {
     }
     if ($From -ne $ceo) { throw "只有 CEO（当前：$ceo）能建任务。其他成员请用 post / claim / done。" }
     if ([string]::IsNullOrWhiteSpace($Text)) { throw "task: 需要 -Text（任务标题）" }
-    $m = Add-Message @{ from=$From; kind='task'; to=''; task=0; text=$Text }
-    Write-Output ("[#{0}] {1} 建任务: {2}" -f $m.seq, $m.from, $m.text)
+    $m = Add-Message @{ from=$From; kind='task'; to=$To; task=0; text=$Text
+                        thread=$Thread; reply_to=$ReplyTo; mentions=$Mentions
+                        hop=$Hop; via=$Via }
+    Write-Output (("[#{0}] {1} 建任务: {2}" -f $m.seq, $m.from, $m.text))
   }
 
   'claim' {
     if ($Task -le 0) { throw "claim: 需要 -Task <序号>" }
-    $m = Add-Message @{ from=$From; kind='claim'; to=''; task=$Task; text="认领任务 #$Task" }
-    Write-Output ("[#{0}] {1} 认领 #{2}" -f $m.seq, $m.from, $Task)
+    $m = Add-Message @{ from=$From; kind='claim'; to=''; task=$Task; text="认领任务 #$Task"
+                        thread=$Thread; reply_to=$Task; mentions=$Mentions
+                        hop=$Hop; via=$Via }
+    Write-Output (("[#{0}] {1} 认领 #{2}" -f $m.seq, $m.from, $Task))
   }
 
   'done' {
     if ($Task -le 0) { throw "done: 需要 -Task <序号>" }
-    # -To 必填：结果必须回到明确的收件人（约定 -To dsh 回调度者），否则悬空没人收。
+    # -To 必填：结果必须回到明确的收件人（约定 -To <派单人>），否则悬空没人收。
     if ([string]::IsNullOrWhiteSpace($To)) { throw "done: 需要 -To <收件人>（回给派单人，通常就是 CEO）" }
     $body = if ([string]::IsNullOrWhiteSpace($Text)) { "完成任务 #$Task" } else { $Text }
-    $m = Add-Message @{ from=$From; kind='done'; to=$To; task=$Task; text=$body }
-    Write-Output ("[#{0}] {1} 完成 #{2} → {3}: {4}" -f $m.seq, $m.from, $Task, $m.to, $body)
+    $m = Add-Message @{ from=$From; kind='done'; to=$To; task=$Task; text=$body
+                        thread=$Thread; reply_to=$Task; mentions=$Mentions
+                        hop=$Hop; via=$Via }
+    Write-Output (("[#{0}] {1} 完成 #{2} → {3}: {4}" -f $m.seq, $m.from, $Task, $m.to, $body))
   }
 
   'read' {
@@ -176,23 +215,44 @@ switch ($Command) {
     # 必须先筛 seq > Since 再取「前」Limit 条。-Since 的用途是增量轮询：
     # 每次从最旧的未读开始读，读完把 Since 推进到最后一条的 seq。
     # 用 -Last 会把最早的新消息挤掉，轮询时直接漏读。
-    $sel = $all | Where-Object { $_.seq -gt $Since } | Select-Object -First $Limit
-    if (-not $sel) { Write-Output "(无新消息，当前共 $($all.Count) 条)"; break }
+    $unread = @($all | Where-Object { $_.seq -gt $Since })
+    $sel = @($unread | Select-Object -First $Limit)
+    # 增量读的可见性：积压超过 Limit 必须告诉调用方窗口被截断，
+    # 否则 poller 会以为已经看全了（验收项之一）。
+    $truncated = ($unread.Count -gt $sel.Count)
+
+    if ($Json) {
+      $payload = [ordered]@{ messages = $sel; count = $all.Count; truncated = $truncated; remaining = ($unread.Count - $sel.Count) }
+      Write-Output ($payload | ConvertTo-Json -Depth 6 -Compress)
+      break
+    }
+    if ($sel.Count -eq 0) { Write-Output "(无新消息，当前共 $($all.Count) 条)"; break }
     foreach ($m in $sel) {
       $t = ([datetime]$m.ts).ToLocalTime().ToString('HH:mm:ss')
       $tag = if ($m.kind -eq 'msg') { '' } else { "[$($m.kind)]" }
       $arrow = if ($m.to) { " → $($m.to)" } else { '' }
-      Write-Output ("#{0,-4} {1}  {2,-10}{3}{4}  {5}" -f $m.seq, $t, $m.from, $arrow, $tag, $m.text)
+      # 变量名不能叫 $hop/$via：PowerShell 大小写不敏感，会撞上 param 里的
+      # [int]$Hop 和 [string]$Via，给 int 赋字符串直接抛类型转换错误。
+      $hopTag = if ($m.hop -gt 0) { " ↻$($m.hop)" } else { '' }
+      $viaTag = if ($m.via -and $m.via -ne 'human') { " <$($m.via)>" } else { '' }
+      Write-Output (("#{0,-4} {1}  {2,-10}{3}{4}{5}{6}  {7}" -f $m.seq, $t, $m.from, $arrow, $tag, $hopTag, $viaTag, $m.text))
     }
+    if ($truncated) { Write-Output "(还有 $($unread.Count - $sel.Count) 条未读，把 -Since 推进到最后一条 seq 再读)" }
   }
 
   'tail' {
     Get-Messages
     $all = @($script:Messages)
-    $sel = $all | Select-Object -Last $Limit
+    $sel = @($all | Select-Object -Last $Limit)
+    if ($Json) {
+      $payload = [ordered]@{ messages = $sel; count = $all.Count; truncated = ($all.Count -gt $sel.Count) }
+      Write-Output ($payload | ConvertTo-Json -Depth 6 -Compress)
+      break
+    }
     foreach ($m in $sel) {
       $t = ([datetime]$m.ts).ToLocalTime().ToString('HH:mm:ss')
-      Write-Output ("#{0,-4} {1}  {2,-10} [{3}]  {4}" -f $m.seq, $t, $m.from, $m.kind, $m.text)
+      $hopTag = if ($m.hop -gt 0) { " ↻$($m.hop)" } else { '' }
+      Write-Output (("#{0,-4} {1}  {2,-10} [{3}]{4}  {5}" -f $m.seq, $t, $m.from, $m.kind, $hopTag, $m.text))
     }
   }
 
@@ -210,7 +270,8 @@ switch ($Command) {
     $all | Group-Object from | Sort-Object Count -Descending | ForEach-Object {
       $last = ($_.Group | Sort-Object seq | Select-Object -Last 1)
       $lt = ([datetime]$last.ts).ToLocalTime().ToString('MM-dd HH:mm:ss')
-      Write-Output ("{0,-12} {1,4} 条   最后 {2}" -f $_.Name, $_.Count, $lt)
+      $auto = @($_.Group | Where-Object { $_.via -and $_.via -ne 'human' }).Count
+      Write-Output (("{0,-12} {1,4} 条（自动 {2}）  最后 {3}" -f $_.Name, $_.Count, $auto, $lt))
     }
   }
 
@@ -220,7 +281,8 @@ switch ($Command) {
     $tasks = @($all | Where-Object { $_.kind -eq 'task' })
     $claims = @($all | Where-Object { $_.kind -eq 'claim' })
     $dones = @($all | Where-Object { $_.kind -eq 'done' })
-    Write-Output ("总消息 {0} | 任务 {1} | 认领 {2} | 完成 {3}" -f $all.Count, $tasks.Count, $claims.Count, $dones.Count)
-    Write-Output ("日志: {0}  ({1} B)" -f $Room, $(if(Test-Path $Room){ (Get-Item $Room).Length } else { 0 }))
+    $auto = @($all | Where-Object { $_.via -and $_.via -ne 'human' })
+    Write-Output (("总消息 {0} | 任务 {1} | 认领 {2} | 完成 {3} | 自动 {4}" -f $all.Count, $tasks.Count, $claims.Count, $dones.Count, $auto.Count))
+    Write-Output (("日志: {0}  ({1} B)" -f $Room, $(if(Test-Path $Room){ (Get-Item $Room).Length } else { 0 })))
   }
 }
