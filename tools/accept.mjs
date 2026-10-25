@@ -321,6 +321,92 @@ if (process.argv.includes('--live')) {
   ok('同一 thread', new Set(chain.map((m) => m.thread)).size === 1, [...new Set(chain.map((m) => m.thread))].join(','));
 }
 
+// ---------------- 8. 「没人回」诊断 ----------------
+section('8. 没人回复的诊断');
+{
+  // 这段判据曾经印出过「@opencode 没有 driver 在接（只有 dsh / hermes / opencode 在线）」
+  // —— 目标明明在线，真实原因是跳数到顶。它埋在 busd.mjs 里没法测（一 import 就起服务器），
+  // 所以挪到 lib/diagnose.mjs 之后补这组用例，钉死那个矛盾。
+  const { makeDiagnose } = await import("../lib/diagnose.mjs");
+  const D = makeDiagnose({ root: TMP, members: ['dsh', 'hermes', 'opencode'] });
+  const cfg = { autoChat: true, maxHop: 3, pausedUntil: 0, pauseReason: '', hopReset: {} };
+  const MEMBS = ["dsh", "hermes", "opencode"];
+
+  const writeRoom = (msgs) => fs.writeFileSync(path.join(TMP, "room.jsonl"),
+    msgs.map((m) => JSON.stringify(m)).join("\n") + "\n", "utf8");
+  const setHb = (live) => {
+    for (const n of MEMBS) fs.rmSync(path.join(TMP, `.heartbeat-${n}.json`), { force: true });
+    for (const n of live) {
+      fs.writeFileSync(path.join(TMP, `.heartbeat-${n}.json`),
+        JSON.stringify({ name: n, ts: Date.now(), state: "idle" }), "utf8");
+    }
+  };
+  const setCur = (n, consumed = []) => fs.writeFileSync(path.join(TMP, `.cursor-${n}.json`),
+    JSON.stringify({ consumed, lastSeq: 0, baseline: 0 }), "utf8");
+  const mk = (o) => ({ ts: new Date().toISOString(), kind: "msg", task: 0, thread: "t1",
+    reply_to: 0, mentions: "", hop: 0, via: "human", ...o });
+
+  // A. 点名目标在线、真实原因是跳数到顶 —— 就是修掉的那个 bug
+  setHb(MEMBS);
+  for (const n of MEMBS) setCur(n, []);
+  fs.rmSync(path.join(TMP, ".claims.jsonl"), { force: true });
+  writeRoom([mk({ seq: 1, from: "hermes", to: "opencode", mentions: "opencode",
+    hop: 3, via: "driver:hermes", text: "转手三次的消息" })]);
+  {
+    const all = readAll();
+    const t = D.diagnose(all[0], all, cfg);
+    ok('点名目标在线时报它自己的原因', t.includes('@opencode 在线，但') && t.includes('跳数到顶'), t);
+    ok('不再自相矛盾地说它没 driver', !t.includes('没有 driver 在接'), t);
+  }
+
+  // B. 点名目标真的没有 driver
+  setHb(["hermes"]);
+  {
+    const all = readAll();
+    const t = D.diagnose(all[0], all, cfg);
+    ok('目标无 driver 时能说清楚', t.includes('@opencode 没有 driver 在接') && t.includes('hermes'), t);
+  }
+
+  // C. 总开关关着
+  setHb(MEMBS);
+  writeRoom([mk({ seq: 1, from: "human", to: "*", mentions: "*", text: "开关关着的广播" })]);
+  {
+    const all = readAll();
+    const t = D.diagnose(all[0], all, { ...cfg, autoChat: false });
+    ok('开关关着时报开关', t.includes('总开关'), t);
+  }
+
+  // D. 一个 driver 都没有
+  setHb([]);
+  {
+    const all = readAll();
+    const t = D.diagnose(all[0], all, cfg);
+    ok('没人跑时报没人跑', t.includes('没有任何 driver'), t);
+  }
+
+  // E. 广播已经被别人回过
+  setHb(MEMBS);
+  writeRoom([mk({ seq: 1, from: "human", to: "*", mentions: "*", text: "已被回过的广播" }),
+    mk({ seq: 2, from: "hermes", to: "human", hop: 1, via: "driver:hermes", reply_to: 1, text: "我来回" })]);
+  {
+    const all = readAll();
+    const t = D.diagnose(all[0], all, cfg);
+    ok('已有人回过时报回过', t.includes('已有人回过'), t);
+  }
+
+  // F. 有人会回 —— 不该给任何解释
+  writeRoom([mk({ seq: 1, from: "human", to: "*", mentions: "*", text: "没人回过的广播" })]);
+  {
+    const all = readAll();
+    ok('有人会回时不报原因', D.diagnose(all[0], all, cfg) === '', D.diagnose(all[0], all, cfg));
+  }
+
+  // 收尾：别把假心跳/假游标留给后面的用例
+  for (const n of MEMBS) {
+    fs.rmSync(path.join(TMP, `.heartbeat-${n}.json`), { force: true });
+    fs.rmSync(path.join(TMP, `.cursor-${n}.json`), { force: true });
+  }
+}
 console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====`);
 console.log(`验收 runtime: ${TMP}`);
 process.exit(fail ? 1 : 0);

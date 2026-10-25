@@ -11,7 +11,7 @@ append-only JSONL 日志 + NTFS 独占锁 + 三个薄 driver。零 npm 依赖，
                                               │
    driver:hermes ──ACP──> hermes-acp.exe ─────┤
    driver:opencode ─ACP─> opencode-cli acp ───┤
-   driver:dsh（未做）    outbox 文件 ─────────┘
+   driver:dsh ─spawn─> dsh headless ─────────┘
 ```
 
 ## 快速开始
@@ -20,14 +20,14 @@ append-only JSONL 日志 + NTFS 独占锁 + 三个薄 driver。零 npm 依赖，
 # 只开工作台（看板 + 人工发言，不自动对话）
 powershell -NoProfile -ExecutionPolicy Bypass -File start.ps1
 
-# 工作台 + 两个 driver（agent 之间能自动对话）
+# 工作台 + 三个 driver（agent 之间能自动对话）
 powershell -NoProfile -ExecutionPolicy Bypass -File start.ps1 -WithDrivers
 
 # 停
 powershell -NoProfile -ExecutionPolicy Bypass -File stop.ps1
 ```
 
-打开 http://127.0.0.1:8088 。**自动对话默认是关的**，在左栏打开「总开关」后，被 `@点名` 的 agent 才会自动回复。
+打开 http://127.0.0.1:8088 。**自动对话默认是关的**，在左栏打开「总开关」后才会自动回复：不点名 = `@全体`（三个人抢，一人回），`@名字` 只给那一个。
 
 ## 目录
 
@@ -39,13 +39,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File stop.ps1
 | `lib/bus.mjs` | Node 侧读写，同一把锁。driver/busd 用它 |
 | `lib/gates.mjs` | 六道闸（单一实现，driver 和 busd 共用） |
 | `lib/config.mjs` | hub-config.json 读写 |
+| `lib/diagnose.mjs` | 「这条为什么没人回」的判据（复用 gates 的六道闸，不另写一套） |
 | `drivers/acp.mjs` | 通用 ACP 客户端（Hermes / OpenCode 共用） |
 | `drivers/driver.mjs` | 驱动循环：轮询→过闸→投喂→写回 |
 | `drivers/hermes.mjs` | Hermes 入口（`hermes-acp.exe`） |
 | `drivers/opencode.mjs` | OpenCode 入口（`opencode-cli.exe acp`） |
+| `drivers/dsh.mjs` | DSH 入口（`dsh headless`，一次一进程） |
 | `webui/busd.mjs` | 工作台后端（只读 + 人工发言 + 配置） |
 | `webui/index.html` | 单文件前端，无构建 |
-| `tools/accept.mjs` | 验收脚本（26 项） |
+| `tools/accept.mjs` | 验收脚本（56 项） |
 | `tools/say.mjs` | 命令行发消息（中文安全，见已知坑 7） |
 | `tools/probe.mjs` | 单独探一个 agent 的 ACP 通道 |
 | `tools/stress.mjs` | 写压测：10 进程 × 30 条，验不丢不重（见下） |
@@ -227,7 +229,7 @@ POST /api/cancel           {agent}
 ## 验收
 
 ```powershell
-node tools/accept.mjs          # 49 项，几秒，不需要 LLM
+node tools/accept.mjs          # 56 项，几秒，不需要 LLM
 node tools/accept.mjs --live   # 加上真 agent 的 A→B→A 双向对话，要几分钟
 node tools/stress.mjs          # 写压测：10 进程 × 30 条，约 20 秒
 ```
@@ -235,7 +237,8 @@ node tools/stress.mjs          # 写压测：10 进程 × 30 条，约 20 秒
 覆盖的是失败路径，不是 happy path：六道闸逐条、群聊广播与抢答原子性、
 熔断计数、PS 与 Node 混写并发、游标重放、首次启动基线、增量读截断、driver 不依赖 busd。
 
-2026-10-25 实测：49/49 通过。真链路实测链：`human→hermes(hop1)→opencode(hop2)→hermes(hop3)→opencode 被 hop-limit 拦住`。
+2026-10-26 实测：56/56 通过。真链路实测链：`human→hermes(hop1)→opencode(hop2)→hermes(hop3)→opencode 被 hop-limit 拦住`。
+群聊实测：广播 #71/#79 三人抢答，62/68/79 落 hermes、71/74 落 opencode、#77/#82 定向投 dsh。
 
 ### 写压测
 
@@ -275,6 +278,12 @@ $env:BUS_POWERSHELL='pwsh.exe'; node tools/stress.mjs   # 换 pwsh 7 跑一遍
 12. **`.bus.lock` 残留会让所有人卡 10 秒**：正常退出一定会删锁，但进程被强杀会留下。
     老版本的判据只看时间，会把一次慢写入误判成死锁——现在改成「mtime > 120 秒 **且** pid 已死」
     才清。确认没有写入进行中时直接删 `.bus.lock` 最快。
+13. **DSH 走 `headless` 而不是 ACP**：`dsh acp` 能连上、能建会话，但一发 prompt 就报
+     `no API key for provider route "deepseek-official"`。桌面端能聊是因为它的凭据走
+     device grant（`.dsh/.credentials.yaml` 里的 `deepseek-account-platform/device`），
+     不是 API key，命令行进程拿不到。所以 `drivers/dsh.mjs` 每次回答 spawn 一次
+     `dsh headless "<prompt>"`，stdout 就是答案正文（reasoning 和插件警告在 stderr）。
+     代价是 ~12 秒/轮且没有持久会话；好处是这条路真能跑通。
 
 ## 调度模型
 

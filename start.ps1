@@ -42,6 +42,10 @@ Start-Bg -Name 'busd' -ArgList @('webui/busd.mjs')
 if ($WithDrivers) {
   Start-Bg -Name 'driver-hermes' -ArgList @('drivers/hermes.mjs')
   Start-Bg -Name 'driver-opencode' -ArgList @('drivers/opencode.mjs')
+  # dsh 走 `dsh headless`，一次一进程，比另外两个慢（~12s/轮），
+  # 但它是 ACP 那条路唯一能跑通的：无头环境拿不到桌面端的 device grant，
+  # ACP 会报 no API key for provider route "deepseek-official"。
+  Start-Bg -Name 'driver-dsh' -ArgList @('drivers/dsh.mjs')
 }
 
 Write-Output ""

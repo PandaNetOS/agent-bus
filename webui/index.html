@@ -247,7 +247,7 @@
   </div>
   <div id="msgs" class="col"></div>
   <div id="composer">
-    <div id="composertip" class="tip">发给全体 · Hermes / OpenCode 谁先抢到谁回</div>
+    <div id="composertip" class="tip">发给全体 · 谁先抢到谁回</div>
     <div class="row">
       <textarea id="say" placeholder="说话…（不点名 = @全体；@hermes 只给它，@opencode 转交）"></textarea>
       <button id="send">发送</button>
@@ -561,7 +561,12 @@ function renderEvents() {
   box.scrollTop = box.scrollHeight;
 }
 
-function renderAll() { renderMembers(); renderCeo(); renderConfig(); renderTasks(); renderCounts(); renderMsgs(); }
+function renderAll() { renderMembers(); renderCeo(); renderConfig(); renderTasks(); renderCounts(); renderMsgs();
+  // 成员上下线会变（driver 是独立进程），输入框提示里的「谁会抢着回」
+  // 也得跟着变，否则 driver 起来了界面上还印着旧的名单。
+  // updateTip 只读输入框当前值重算，幂等，不会打断正在打字的人。
+  updateTip();
+}
 
 // ---------- 数据 ----------
 async function loadState() { STATE = await (await fetch('/api/state')).json(); renderAll(); }
@@ -606,11 +611,6 @@ function updateTip() {
   const tip = $('#composertip');
   if (!ta || !tip) return;
   const m = ta.value.match(/@([a-z0-9_-]+)/i);
-  if (!ta.value.trim()) {
-    tip.className = 'tip';
-    tip.textContent = '发给全体 · Hermes / OpenCode 谁先抢到谁回';
-    return;
-  }
   if (m) {
     const n = m[1].toLowerCase();
     const known = AGENT_SET().has(n);
@@ -620,6 +620,10 @@ function updateTip() {
       : `@${n} 不是群成员（群里现在有：${(STATE?.members || []).map((x) => x.name).join(' / ')}）`;
     return;
   }
+  // 空输入和不带 @ 的输入走同一条路。
+  // 之前空输入直接写死「Hermes / OpenCode」，dsh 接进来以后这里就成了
+  // 界面上唯一还没反映新成员的地方：三个人抢答，提示里却只印两个。
+  // 这里同样要报开关关 / 没人跑 —— 空着的时候正是用户最该看到预警的时刻。
   tip.className = 'tip';
   const live = (STATE?.members || []).filter((x) => x.online).map((x) => x.name);
   if (!STATE?.config?.autoChat) {
