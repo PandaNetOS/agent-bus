@@ -6,17 +6,19 @@
 
 ## 文件
 
+运行时目录 `D:\PNOS\agent-bus\`，代码仓库 `github.com/pandamelive/agent-bus`。
+
 | 路径 | 作用 |
 |---|---|
-| `D:\agent-bus\room.jsonl` | 消息日志，append-only，UTF-8 无 BOM |
-| `D:\agent-bus\bus.ps1` | 唯一入口 |
-| `D:\agent-bus\artifacts\` | 产出物（文件、报告等）放这里 |
-| `D:\agent-bus\.bus.lock` | 锁文件（运行时短暂存在，平时不存在） |
+| `D:\PNOS\agent-bus\room.jsonl` | 消息日志，append-only，UTF-8 无 BOM |
+| `D:\PNOS\agent-bus\bus.ps1` | 唯一入口 |
+| `D:\PNOS\agent-bus\artifacts\` | 产出物（文件、报告等）放这里 |
+| `D:\PNOS\agent-bus\.bus.lock` | 锁文件（运行时短暂存在，平时不存在） |
 
 ## 命令
 
 ```powershell
-$BUS = 'D:\agent-bus\bus.ps1'
+$BUS = 'D:\PNOS\agent-bus\bus.ps1'
 
 # 发消息
 pwsh -NoProfile -File $BUS post -From dsh -Text "开始干活"
@@ -65,13 +67,13 @@ pwsh -NoProfile -File $BUS stats
 ### Hermes
 
 ```powershell
-D:\Hermes\bin\hermes.exe -z "用 pwsh 运行 D:\agent-bus\bus.ps1 read 并把结果告诉我"
+D:\Hermes\bin\hermes.exe -z "用 pwsh 运行 D:\PNOS\agent-bus\bus.ps1 read 并把结果告诉我"
 ```
 
 ### OpenCode
 
 ```powershell
-& "$env:APPDATA\ai.opencode.desktop\cli\2.1.4-x64\opencode-cli.exe" run --prompt "运行 D:\agent-bus\bus.ps1 read 并把结果告诉我"
+& "$env:APPDATA\ai.opencode.desktop\cli\2.1.4-x64\opencode-cli.exe" run --prompt "运行 D:\PNOS\agent-bus\bus.ps1 read 并把结果告诉我"
 ```
 
 ## 已验证
@@ -85,7 +87,7 @@ D:\Hermes\bin\hermes.exe -z "用 pwsh 运行 D:\agent-bus\bus.ps1 read 并把结
 
 ## 已知坑
 
-1. **反斜杠被吞**：OpenCode 第一次调用时把 `D:\agent-bus\bus.ps1` 传成了 `D:agent-busbus.ps1`。**加单引号** `'D:\agent-bus\bus.ps1'` 可避免。
+1. **反斜杠被吞**：OpenCode 第一次调用时把 `D:\PNOS\agent-bus\bus.ps1` 传成了 `D:agent-busbus.ps1`。**加单引号** `'D:\PNOS\agent-bus\bus.ps1'` 可避免。
 2. **中文乱码**：早期版本在裸 `pwsh -File` 调用下中文显示乱码，已通过脚本开头强制 `[Console]::OutputEncoding = UTF8` 修复。
 3. **锁超时**：单次写锁等待 10 秒，超时会报错。正常不会触发。
 

@@ -25,7 +25,7 @@ param(
   [int]$Limit = 30,
   [int]$Task = 0,
   [string]$Kind = 'msg',      # msg | task | claim | done | note
-  [string]$Root = 'D:\agent-bus'
+  [string]$Root = 'D:\PNOS\agent-bus'
 )
 
 $ErrorActionPreference = 'Stop'
