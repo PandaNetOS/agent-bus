@@ -407,6 +407,113 @@ section('8. 没人回复的诊断');
     fs.rmSync(path.join(TMP, `.cursor-${n}.json`), { force: true });
   }
 }
+// ---------------- 9. 转交必须显式 ----------------
+section('9. 回复转交的显式性');
+{
+  // routeReply 原来扫全文取第一个 @名字。于是 agent 写一句
+  // 「我和 @opencode 双侧实据一致」，就把回给用户的话改投给了 opencode ——
+  // 用户问「下午好」，agent 回一句下午好，然后跟 opencode 开起了会。
+  // 实测 6 条被这样劫持（#62/#63/#64/#74/#79/#93）。
+  const { routeReply } = await import("../drivers/driver.mjs");
+  const AG = ['dsh', 'hermes', 'opencode'];
+  const R = (text, fallback = "human", me = "dsh") => routeReply(text, fallback, me, AG);
+
+  ok('开头 @名字 = 转交', R('@opencode 这个交给你') === 'opencode', R('@opencode 这个交给你'));
+  ok('无 @ = 回给问的人', R('好的，我来处理') === 'human', R('好的，我来处理'));
+
+  // 这就是那个 bug：正文中间的顺带提及
+  const buggy = '下午好。\n\n悬着的一件还是 #73 的定性结论，我和 @opencode 双侧实据一致：不是投递掉包。';
+  ok('正文中段的 @ 不再劫持收件人', R(buggy) === 'human', `实际=${R(buggy)}`);
+  ok('开头 @ 仍然生效（不误伤）', R('@opencode ' + buggy) === 'opencode');
+
+  ok('@自己 不算转交', R('@dsh 我来', 'human', 'dsh') === 'human', R('@dsh 我来', 'human', 'dsh'));
+  ok('@不存在的人 不算转交', R('@nobody 你看', 'human', 'dsh') === 'human', R('@nobody 你看', 'human', 'dsh'));
+  ok('行首空白不影响判定', R('   @hermes 你去', 'human', 'dsh') === 'hermes', R('   @hermes 你去', 'human', 'dsh'));
+  ok('@名字后跟标点仍算转交', R('@hermes：这个是你的', 'human', 'dsh') === 'hermes', R('@hermes：这个是你的', 'human', 'dsh'));
+  ok('正文换行后再 @ 不算转交', R('先说结论。\n@opencode 你补充', 'human', 'dsh') === 'human');
+}
+
+// ---------------- 10. 时效闸 ----------------
+section('10. 时效闸');
+{
+  // 起因：#64「你好」在 37 分钟后才被回答。反循环闸是「最近 20 条」的滑动窗口，
+  // 跟时间没关系——20 条新消息进来，老消息自动解禁。时效必须按时间判。
+  const cfg0 = { autoChat: true, maxHop: 3, pausedUntil: 0, hopReset: {} };
+  const ago = (ms) => new Date(Date.now() - ms).toISOString();
+  const m = (over) => ({ seq: 1, from: "human", to: "hermes", mentions: "hermes",
+    hop: 0, via: "human", text: "你好", ts: ago(over) });
+
+  ok('1 分钟前的消息照常投喂', gates.gate(m(60_000), { me: 'hermes', all: [m(60_000)], config: cfg0 }).ok === true);
+  {
+    const mm = m(10 * 60_000);
+    const g = gates.gate(mm, { me: "hermes", all: [mm], config: cfg0 });
+    ok('10 分钟没人接 → 过期', g.ok === false && g.reason === 'stale', JSON.stringify(g));
+    ok('过期文案带上真实分钟数', /10\s*分钟/.test(g.detail || ''), g.detail);
+  }
+  {
+    // maxAgeMs 可配置，且能放宽到比默认更长
+    const mm = m(10 * 60_000);
+    const g = gates.gate(mm, { me: "hermes", all: [mm], config: { ...cfg0, maxAgeMs: 20 * 60_000 } });
+    ok('maxAgeMs 可调：放宽到 20 分钟后放行', g.ok === true, JSON.stringify(g));
+  }
+  {
+    // 没 ts 字段的老消息不能因为时效闸被卡死
+    const mm = { seq: 1, from: "human", to: "hermes", mentions: "hermes", hop: 0, via: "human", text: "x" };
+    const g = gates.gate(mm, { me: "hermes", all: [mm], config: cfg0 });
+    ok('缺 ts 的老消息不受时效闸影响', g.ok === true, JSON.stringify(g));
+  }
+}
+// ---------------- 11. 改动检测（不拦截） ----------------
+section('11. 工作目录改动检测');
+{
+  // dsh 走 headless，没有工具流可拦；只有 hermes/opencode 有 ACP tool_call 事件。
+  // 三者能力不一致，硬拦两个会给人虚假的安全感 —— 所以统一做成「检测并说出来」。
+  // 这里钉死两个已知盲区：运行时文件要忽略、已改动文件再改一次不能漏。
+  const { snapshotWorkdir } = await import('../drivers/driver.mjs');
+
+  const D = path.join(TMP, "snapdir");
+  fs.rmSync(D, { recursive: true, force: true });
+  fs.mkdirSync(D, { recursive: true });
+  const W = (n, c) => fs.writeFileSync(path.join(D, n), c, "utf8");
+
+  // A. 运行时文件不算改动
+  W("room.jsonl", "a"); W(".cursor-x.json", "a"); W("busd.log", "a");
+  const sA = snapshotWorkdir(D);
+  W("room.jsonl", "bbbb"); W(".cursor-x.json", "bbbb"); W("busd.log", "bbbb");
+  const sA2 = snapshotWorkdir(D);
+  ok('运行时文件的变化不算改动', sA === sA2);
+
+  // B. 新建文件要发现
+  const sB = snapshotWorkdir(D);
+  W("doc.txt", "v1");
+  ok('新建文件能发现', snapshotWorkdir(D) !== sB);
+
+  // C. **盲区**：文件已存在、投喂期间内容被改 —— 只看 git status 会漏，
+  //     因为 --porcelain 两次都输出同一个文件名，字符串没变。
+  W("doc.txt", "v2");
+  const sC = snapshotWorkdir(D);
+  W("doc.txt", "v3 内容又变了");
+  ok('已存在文件的内容改动能发现', snapshotWorkdir(D) !== sC);
+
+  // D. 同样大小、只改内容（size 相同，靠 mtime）
+  W("doc.txt", "v4 同长度改");
+  const sD = snapshotWorkdir(D);
+  W("doc.txt", "v5 同长度改");
+  ok('同长度改内容也能发现', snapshotWorkdir(D) !== sD);
+
+  // E. 空转不能误报
+  const sE = snapshotWorkdir(D);
+  ok('无改动时快照稳定', snapshotWorkdir(D) === sE);
+
+  // F. 子目录也要扫到（agent 可能在子目录里改）
+  fs.mkdirSync(path.join(D, "sub"), { recursive: true });
+  W("sub/inner.txt", "x");
+  const sF = snapshotWorkdir(D);
+  W("sub/inner.txt", "yyy");
+  ok('子目录里的改动能发现', snapshotWorkdir(D) !== sF);
+
+  fs.rmSync(D, { recursive: true, force: true });
+}
 console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====`);
 console.log(`验收 runtime: ${TMP}`);
 process.exit(fail ? 1 : 0);

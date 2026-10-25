@@ -37,9 +37,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File stop.ps1
 |---|---|
 | `bus.ps1` | 命令行入口（人用）。UTF-8 **带 BOM** + CRLF，见已知坑 4 |
 | `lib/bus.mjs` | Node 侧读写，同一把锁。driver/busd 用它 |
-| `lib/gates.mjs` | 六道闸（单一实现，driver 和 busd 共用） |
-| `lib/config.mjs` | hub-config.json 读写 |
-| `lib/diagnose.mjs` | 「这条为什么没人回」的判据（复用 gates 的六道闸，不另写一套） |
+| `lib/gates.mjs` | 七道闸（单一实现，driver 和 busd 共用） |
+| `lib/config.mjs` | hub-config.json 读写（含 `maxAgeMs` 时效闸阈值） |
+| `lib/diagnose.mjs` | 「这条为什么没人回」的判据（复用 gates 的七道闸，不另写一套） |
 | `drivers/acp.mjs` | 通用 ACP 客户端（Hermes / OpenCode 共用） |
 | `drivers/driver.mjs` | 驱动循环：轮询→过闸→投喂→写回 |
 | `drivers/hermes.mjs` | Hermes 入口（`hermes-acp.exe`） |
@@ -47,7 +47,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File stop.ps1
 | `drivers/dsh.mjs` | DSH 入口（`dsh headless`，一次一进程） |
 | `webui/busd.mjs` | 工作台后端（只读 + 人工发言 + 配置） |
 | `webui/index.html` | 单文件前端，无构建 |
-| `tools/accept.mjs` | 验收脚本（56 项） |
+| `tools/accept.mjs` | 验收脚本（76 项） |
 | `tools/say.mjs` | 命令行发消息（中文安全，见已知坑 7） |
 | `tools/probe.mjs` | 单独探一个 agent 的 ACP 通道 |
 | `tools/stress.mjs` | 写压测：10 进程 × 30 条，验不丢不重（见下） |
@@ -215,6 +215,33 @@ POST /api/cancel           {agent}
 **回复里的 `@名字` 会改投给那个 agent** —— 这是 A 把活交给 B 的唯一方式。没有它 agent 只能回给发消息的人，那还是留言板。
 
 **hop 上限 3 的理由**：人问 A(0) → A 找 B(1) → B 回 A(2) → A 回人(3 停)。三条往返够一次协作，再长就是互相客套烧 token。到顶后在 WebUI 点「放行」把该线程的 hop 归零。
+
+### 被闸门拦下的消息：driver 日志零留痕
+
+点名消息（`@名字`）和广播一样要过 hop 闸。**被闸拦下时 `driver-<名>.log` 里一行都不会多**：
+`pending()`（`lib/gates.mjs:133`）在 driver 循环里先过滤（`drivers/driver.mjs:287`），
+日志是投喂之后才写的（`drivers/driver.mjs:305`），
+过滤发生在写日志之前，所以没有「已读但拒绝」的记录——它连进日志的机会都没有。
+
+排查「这条为什么没人回」不要翻 driver 日志，用：
+
+- `explain()`（`lib/gates.mjs` 内，`lib/diagnose.mjs` 复用它）：返回最近 40 条点名消息的 `ok/reason/detail`
+- WebUI：hop 到顶的消息标黄并带「放行」按钮
+
+### maxHop=3 的 off-by-one 之争：结论是「没有」
+
+dsh 曾在这里写过一节，主张 `maxHop=3` 存在 off-by-one、hop=3 的消息根本写不出来。
+**实测推翻了它**：`room.jsonl` 里 hop=3 的消息真实存在 3 条（#73 就是其中之一），
+所以「hop=3 根本进不来」不成立，文档第 222 行的「人问 A(0) → A 找 B(1) → B 回 A(2) → A 回人(3 停)」描述是对的。
+
+它之所以推出这个错结论，是因为它拿来当证据的那条链（t-63）本身就是被旧的路由劫持扭曲的：
+#67 正文里顺带提到 `@opencode`，就被改投给了 opencode，链条走向偏离了它以为的样子。
+**用被 bug 污染的数据去论证 bug 的成因，结论必然偏**——这也是后来把 `routeReply` 改成
+「只有第一行开头的 @ 才算转交」的直接原因（见上一节）。
+
+保留它对的那半：`pending()`（`gates.mjs:133`）确实在写日志之前过滤（`driver.mjs:287` 过滤、
+`driver.mjs:305` 才写日志），所以被闸拦下的消息在 `driver-<名>.log` 里零留痕。
+（原文引用的 `gates.mjs:111` / `driver.mjs:180` 已随重构失效，这里按当前行号更正。）
 
 **首次启动不投喂历史**：没有游标文件时基线设为当前最新 seq。否则新装一个 driver、开关一打开，它会从 #1 开始把整个历史全回答一遍。要重放得显式 `--replay`。
 

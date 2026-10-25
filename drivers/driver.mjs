@@ -10,6 +10,7 @@
  *   3. agent 崩了就重启会话，不退出进程——一个 driver 挂了不该需要人手动拉起。
  */
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { ROOT, readAll, append, claimReply } from '../lib/bus.mjs';
 import { ensureConfig, readConfig, writeConfig } from '../lib/config.mjs';
@@ -25,16 +26,119 @@ const AGENT_NAMES = (process.env.AGENT_BUS_MEMBERS || 'dsh,hermes,opencode')
 
 /**
  * 回复里的 @名字 决定这条消息寄给谁。
- * 没有这个，agent 只能回给发消息的人，A 就没法把活转给 B —— 那还是留言板。
+ *
+ * **只有写在最开头的 @名字 才算转交。** 正文中段的顺带提及不算。
+ *
+ * 原实现扫全文取第一个 @，于是 agent 写一句「我和 @opencode 双侧实据一致」，
+ * 就把回给你的话改投给了 opencode —— 你问「下午好」，它回一句下午好，然后
+ * 开始跟 opencode 开会，你在群里看到的是两个 agent 自说自话。实测 6 条
+ * 被这样劫持（#62/#63/#64/#74/#79/#93）。
+ *
+ * 转交是重动作：这话从此不回给问它的人了。重动作必须显式、可预测，
+ * 而且 agent 能学会——「想转交就把 @名字 放第一行」比「别在正文里提人」好教。
+ *
+ * 导出是为了能测：它被埋在 driver 里当私有函数时，上面那个 bug 没法钉。
  */
-function routeReply(text, fallback, me) {
-  const found = [...String(text || '').matchAll(/@([a-z0-9_-]+)/gi)]
-    .map((m) => m[1].toLowerCase())
-    .filter((n) => n !== me.toLowerCase() && AGENT_NAMES.includes(n));
-  return found.length ? found[0] : fallback;
+export function routeReply(text, fallback, me, agentNames = AGENT_NAMES) {
+  const head = String(text || '').trimStart();
+  const m = head.match(/^@([a-z0-9_-]+)\b/i);
+  if (!m) return fallback;
+  const n = m[1].toLowerCase();
+  // @自己 和 @不存在的人 都不算转交，退回默认收件人（问话的人）
+  if (n === String(me).toLowerCase()) return fallback;
+  if (!agentNames.map(String).includes(n)) return fallback;
+  return n;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** bus 自己的运行时文件：driver 写这些是本职工作，不算「擅自改文件」 */
+const RUNTIME_FILES = /^(room\.jsonl|ceo\.txt|hub-config\.json|\.claims\.jsonl|\.bus\.lock|\.cursor-.+|\.heartbeat-.+|\.pid-.+|stream-.+\.jsonl|.+\.log)$/i;
+
+/** 递归扫文件时的跳过项：这些目录巨大且不是「工作成果」 */
+const SKIP_DIRS = new Set(['.git', 'node_modules', '.hg', '.svn', 'dist', 'build', '.next']);
+const SCAN_MAX_FILES = 5000;   // 防呆：目录异常大时不要拖死轮询循环
+
+/**
+ * 工作目录快照。**检测，不是拦截。**
+ *
+ * 为什么不是拦截：三个 agent 里只有 hermes/opencode 走 ACP（有 tool_call 事件可拦），
+ * dsh 走 `dsh headless`，整个回答就是一个黑盒进程，没有任何流事件。
+ * 三者的拦截能力不一致，只拦两个会给人虚假的安全感。所以统一做成可见。
+ *
+ * 为什么两份判据缺一不可：
+ *   - 只用 git status：文件在投喂前就已是 M 状态、投喂期间又改了一次，
+ *     `status --porcelain` 两次都输出「M doc.txt」，字符串没变 → 漏报。
+ *   - 只用文件扫描：抓得住内容变化，但可读性差（`doc.txt 12 1234567890`）。
+ * 两份拼在一起：git 那份负责说人话，扫描那份负责不漏。
+ *
+ * 局限（如实记录）：
+ *   - 分不清改动来自 agent 还是正在旁边手改的人，所以措辞是「本轮期间有改动」。
+ *   - 靠 size + mtimeMs 判变化；同一毫秒内改完且大小不变会漏（agent 做不到这么快）。
+ */
+export function snapshotWorkdir(root = ROOT) {
+  const parts = [];
+
+  // 判据一：git status（说人话，也能抓新建/删除）
+  try {
+    // stdio 忽略 stderr：非 git 仓库时 git 会往 stderr 打
+    // "fatal: not a git repository"，直接冒泡到 driver 的控制台，
+    // 每轮一条，很快就把真正的日志淹了。
+    const out = execFileSync('git', ['-C', root, 'status', '--porcelain'], {
+      encoding: 'utf8', timeout: 5000, windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    parts.push(out.split('\n').map((l) => l.trim()).filter(Boolean)
+      .filter((l) => !RUNTIME_FILES.test(l.replace(/^\S+\s+/, '')))
+      .sort().join('\n'));
+  } catch { /* 不是 git 仓库，只靠扫描 */ }
+
+  // 判据二：递归扫文件（抓「已改动文件再改一次」这个盲区）
+  const files = [];
+  const walk = (dir, rel) => {
+    if (files.length >= SCAN_MAX_FILES) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (files.length >= SCAN_MAX_FILES) return;
+      const r = rel ? rel + "/" + e.name : e.name;
+      if (e.isDirectory()) {
+        if (SKIP_DIRS.has(e.name)) continue;
+        walk(path.join(dir, e.name), r);
+      } else if (e.isFile()) {
+        if (RUNTIME_FILES.test(e.name)) continue;
+        try {
+          const st = fs.statSync(path.join(dir, e.name));
+          files.push(`${r} ${st.size} ${st.mtimeMs}`);
+        } catch {}
+      }
+    }
+  };
+  walk(root, "");
+  parts.push(files.sort().join("\n"));
+  return parts.join('\n---\n');
+}
+
+/**
+ * 比对前后快照，把改动记进 driver 日志和该 agent 的 stream。
+ *
+ * **不发总线消息**：那会变成一条新消息被别的 agent 再答一遍，而且读起来
+ * 像 agent 自己说的话。改动是给人看的，走 stream 和日志就够了。
+ */
+function detectFileChanges(name, msg, emit, snapBefore, root) {
+  let snapAfter;
+  try { snapAfter = snapshotWorkdir(root); } catch { return; }
+  if (snapAfter === snapBefore) return;
+
+  const before = new Set(String(snapBefore).split('\n').filter(Boolean));
+  const after = String(snapAfter).split('\n').filter(Boolean);
+  const changed = after.filter((l) => !before.has(l));
+  if (!changed.length) return;
+
+  emit({ type: 'files-changed', seq: msg.seq, files: changed.slice(0, 10) });
+  log(name, `⚠ 处理 #${msg.seq} 期间工作目录有改动：` + changed.slice(0, 5).join(' | '));
+  // 这只是「本轮期间有改动」，不证明是 agent 改的 —— 可能人正在旁边手改。
+}
 
 function cursorPath(name) { return path.join(ROOT, `.cursor-${name}.json`); }
 function heartbeatPath(name) { return path.join(ROOT, `.heartbeat-${name}.json`); }
@@ -94,11 +198,14 @@ export function buildPrompt(msg, me) {
     '直接回答对方。规则：',
     `1. 你的回复会被系统自动发成一条总线消息，收件人默认是 ${msg.from}。`,
     '   **不要自己运行 bus.ps1 发消息**——会重复，而且绕过系统的闸门。',
-    `2. 想把问题交给别人，就在回复里写 @名字（可选：${others.join(' / ')}），系统会自动改投给他。`,
+     `2. 想把问题交给别人：把 @名字 写在回复的**第一行开头**（可选：${others.join(' / ')}）。`,
+     '   **正文中段提到 @名字 不算转交**，收件人仍然是问你的人 —— 所以正文里提别人是安全的。',
+     '   转交意味着问你的人等不到你的回答了，只在真的该别人接手时用。',
     '3. 300 字内，说结论和下一步；不要复述指令，不要说「收到」。',
     '4. 要看历史可以用（只读，不会发消息）：',
     `   powershell -NoProfile -ExecutionPolicy Bypass -File "${busPs1}" tail -Limit 20`,
-    '5. 除非对方明确要求，不要修改任何文件。',
+     '5. **不要修改任何文件**，除非对方在消息里明确要求你改（比如「改一下 README」）。',
+     '   汇报、结案、总结都不算授权。想改就先问，等对方回「改」再动手。',
   ].join('\n');
 }
 
@@ -208,6 +315,11 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
     const emit = makeEmitter(name, msg.seq);
     currentEmit = emit;
 
+    // 投喂前拍一次工作目录快照，投喂后再拍一次。
+    // 三个 agent 里只有 hermes/opencode 走 ACP（有 tool_call 事件可拦），
+    // dsh 走 headless 没有任何流事件 —— 所以不做「拦截」，只做「说出来」。
+    const snapBefore = snapshotWorkdir(workdir);
+
     try {
       const s = await ensureSession();
       const reply = await s.ask(buildPrompt(msg, name));
@@ -229,6 +341,7 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
       });
       emit({ type: 'replied', seq: out.seq, hop: ctx.hop, to: ctx.to });
       log(name, `#${msg.seq} → 回复 #${out.seq} (hop ${ctx.hop}) 给 ${ctx.to}`);
+      detectFileChanges(name, msg, emit, snapBefore, workdir);
       failures = 0;
     } catch (e) {
       failures++;
