@@ -53,7 +53,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File stop.ps1
 | `lib/turn.mjs` | 主持模式下的确定性轮次锁（谁该接这一棒） |
 | `webui/busd.mjs` | 工作台后端（只读 + 人工发言 + 配置） |
 | `webui/index.html` | 单文件前端，无构建 |
-| `tools/accept.mjs` | 验收脚本（156 项） |
+| `tools/accept.mjs` | 验收脚本（179 项） |
 | `tools/say.mjs` | 命令行发消息（中文安全，见已知坑 7） |
 | `tools/probe.mjs` | 单独探一个 agent 的 ACP 通道 |
 | `tools/stress.mjs` | 写压测：10 进程 × 30 条，验不丢不重（见下） |
@@ -276,6 +276,23 @@ driver 把 `[BOARD] {...}` 解析出来、apply 到 `.task.json`，**从可见�
 没有它，五个 agent 会对同一条群消息各说一遍，群瞬间刷屏。被拦下时诊断会说明
 「这条已被足够多的人回过」，不是石沉大海。
 
+### 5. 人一句话结束整局（`detectStop` / `stoppedThreads`）
+
+人喊一句「停 / 先停一下 / 不玩了 / 收手 / 结束这局 / 到此为止…」，整局立刻收手：
+清 `.floor.json` + `.turn.json` + `.task.json`，并把这一场的 thread（`t-${floor.seq}`）
+和停令自己的 thread（`t-${msg.seq}`）记进 `hub-config.json` 的 `stoppedThreads`。
+之后**这条 thread 里的自动回话一律不再投喂**——只放行 agent 直接回人的那句「好，停了」，
+agent 之间不许再在停了的 thread 里接龙或辩论。
+
+为什么封两处 thread：人喊停时旧链 `t-<起头seq>` 还在，在途 agent 会继续接；而「停」
+本身是广播、没 thread，agent 的回应落进新的 `t-<停seq>`，不封就会在「停」下面互相
+辩论谁记对了链（实测 `#528→#530`、`#579→#585`、`#661→#664` 三次都踩了）。
+
+判据只对人生效（agent 之间说「停」不算，那是抢话）；`ANTI_STOP` 排除「别停 / 不要停 /
+继续 / 接着来」这类否定与反向，`停` 单字不匹配（避免「停车 / 停在路边」误停）。
+**busd 和 driver 不退出**：停的是这一局，普通群聊照常；人再「ceo 起头」就是新 seq、
+新 thread，不在黑名单里。
+
 ## driver 与七道闸
 
 一个 driver = 一个 agent 的耳朵和嘴：轮询日志 → 过七闸 → 投喂自己的 agent → 把回复写回。
@@ -295,6 +312,9 @@ driver 把 `[BOARD] {...}` 解析出来、apply 到 `.task.json`，**从可见�
    等于第二次也不理人（实测 `#144`）。
 8. **回复数封顶**：广播消息已被 `maxRepliesPerSeq` 个 agent 回过就不再自动投喂
    （默认 0=不限，运行时设 3）。防止五个人对同一条群消息各说一遍。
+9. **停过的 thread 不再接**（`thread-stopped`）：`msg.thread` 在 `config.stoppedThreads`
+   里且是 agent 自动消息时，只有直接回人的「停」放行，agent 之间对聊一律封。
+   人一句话结束整局用（见上 §5）。
 
 没点名我但与我有关（别人回了我的话 / 我参与过的线程里的后续发言）也看得到 ——
 见上文「群聊语义」的 `reachableInGroup`。与我无关的线程不打扰我。
@@ -389,7 +409,7 @@ dsh 曾在这里写过一节，主张 `maxHop=3` 存在 off-by-one、hop=3 的�
 ## 验收
 
 ```powershell
-node tools/accept.mjs          # 156 项，几秒，不需要 LLM
+node tools/accept.mjs          # 179 项，几秒，不需要 LLM
 node tools/accept.mjs --live   # 加上真 agent 的 A→B→A 双向对话，要几分钟
 node tools/stress.mjs          # 写压测：10 进程 × 30 条，约 20 秒
 ```
@@ -399,7 +419,7 @@ node tools/stress.mjs          # 写压测：10 进程 × 30 条，约 20 秒
 首次启动基线、增量读截断、driver 不依赖 busd、回复转交的显式性、时效闸、工作目录改动检测、
 人说话不许被静默吞掉（human 重复发不算循环、prompt 不给 human 沉默出口、诊断区分「回过」和「沉默」）。
 
-2026-10-26 实测：156/156 通过（含第 15 节「谁起头谁主持」、第 16 节「共享棋盘 / 轮次锁 / 回复数封顶」）。
+2026-10-26 实测：179/179 通过（含第 15/15b 节「谁起头谁主持＋人一句话结束整局」、第 16 节「共享棋盘 / 轮次锁 / 回复数封顶」）。
 
 三组用例是「agent 自说自话」和「群聊不像群聊」两次事故补的：把相关修复各注入一次
 人为 bug，验收分别从 76/0 掉到 68/8、从 92/0 掉到 83/9 —— 它们真的会失败，不是摆设。
