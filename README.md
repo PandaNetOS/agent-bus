@@ -53,7 +53,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File stop.ps1
 | `lib/turn.mjs` | 主持模式下的确定性轮次锁（谁该接这一棒） |
 | `webui/busd.mjs` | 工作台后端（只读 + 人工发言 + 配置） |
 | `webui/index.html` | 单文件前端，无构建 |
-| `tools/accept.mjs` | 验收脚本（148 项） |
+| `tools/accept.mjs` | 验收脚本（156 项） |
 | `tools/say.mjs` | 命令行发消息（中文安全，见已知坑 7） |
 | `tools/probe.mjs` | 单独探一个 agent 的 ACP 通道 |
 | `tools/stress.mjs` | 写压测：10 进程 × 30 条，验不丢不重（见下） |
@@ -389,7 +389,7 @@ dsh 曾在这里写过一节，主张 `maxHop=3` 存在 off-by-one、hop=3 的�
 ## 验收
 
 ```powershell
-node tools/accept.mjs          # 148 项，几秒，不需要 LLM
+node tools/accept.mjs          # 156 项，几秒，不需要 LLM
 node tools/accept.mjs --live   # 加上真 agent 的 A→B→A 双向对话，要几分钟
 node tools/stress.mjs          # 写压测：10 进程 × 30 条，约 20 秒
 ```
@@ -399,7 +399,7 @@ node tools/stress.mjs          # 写压测：10 进程 × 30 条，约 20 秒
 首次启动基线、增量读截断、driver 不依赖 busd、回复转交的显式性、时效闸、工作目录改动检测、
 人说话不许被静默吞掉（human 重复发不算循环、prompt 不给 human 沉默出口、诊断区分「回过」和「沉默」）。
 
-2026-10-26 实测：148/148 通过（含第 15 节「谁起头谁主持」、第 16 节「共享棋盘 / 轮次锁 / 回复数封顶」）。
+2026-10-26 实测：156/156 通过（含第 15 节「谁起头谁主持」、第 16 节「共享棋盘 / 轮次锁 / 回复数封顶」）。
 
 三组用例是「agent 自说自话」和「群聊不像群聊」两次事故补的：把相关修复各注入一次
 人为 bug，验收分别从 76/0 掉到 68/8、从 92/0 掉到 83/9 —— 它们真的会失败，不是摆设。
