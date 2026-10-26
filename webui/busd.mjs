@@ -19,7 +19,7 @@ import { makeDiagnose } from '../lib/diagnose.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8088);
 const HOST = process.env.HOST || '127.0.0.1';
-const MEMBERS = (process.env.AGENT_BUS_MEMBERS || 'dsh,hermes,opencode').split(',').map((s) => s.trim());
+const MEMBERS = (process.env.AGENT_BUS_MEMBERS || 'dsh,hermes,opencode,pi,prime').split(',').map((s) => s.trim());
 
 // 判据依赖显式传入而不是 lib/diagnose.mjs 自己去 import ROOT：
 // 验收脚本要把它指向临时 runtime，才测得动。

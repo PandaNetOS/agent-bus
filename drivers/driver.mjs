@@ -12,16 +12,23 @@
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { ROOT, readAll, append, claimReply } from '../lib/bus.mjs';
+import { ROOT, readAll, append, claimReply, readCeo } from '../lib/bus.mjs';
 import { ensureConfig, readConfig, writeConfig } from '../lib/config.mjs';
-import { pending, replyContext, breakerState, gate, names, isBroadcast, BROADCAST } from '../lib/gates.mjs';
+import { pending, replyContext, breakerState, gate, names, isBroadcast } from '../lib/gates.mjs';
+import { detectLead, readFloor, claimFloor, setOpening, floorBrief } from '../lib/floor.mjs';
+import {
+  extractBoard, readBoard, writeBoard, clearBoard, applyPatch, boardBrief,
+} from '../lib/task.mjs';
+import {
+  initTurn, readTurn, advanceTurn, acquireTurn, currentTurn, clearTurn, turnBrief,
+} from '../lib/turn.mjs';
 
 /** driver 进程内已抢到（或已知被别人抢走）的广播 seq */
 const claimed = new Set();
 
 const MAX_REPLY_CHARS = 2000;
 const CONSUMED_KEEP = 200;
-const AGENT_NAMES = (process.env.AGENT_BUS_MEMBERS || 'dsh,hermes,opencode')
+const AGENT_NAMES = (process.env.AGENT_BUS_MEMBERS || 'dsh,hermes,opencode,pi,prime')
   .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 
 /**
@@ -48,6 +55,28 @@ export function routeReply(text, fallback, me, agentNames = AGENT_NAMES) {
   if (n === String(me).toLowerCase()) return fallback;
   if (!agentNames.map(String).includes(n)) return fallback;
   return n;
+}
+
+/**
+ * 开头连续 @ 的名字列表，用于 mentions（投喂）。
+ *
+ * routeReply 回答「转交给谁」，只能给一个；这条回答「还有谁该看见」，可以给多个。
+ * 判据与 routeReply 保持一致：排除自己、排除不存在的成员；保序去重。
+ * 只扫开头：正文中段的 @ 是顺带提及，不该改变投喂面（#62 那类劫持的教训）。
+ */
+export function routeMentions(text, me, agentNames = AGENT_NAMES) {
+  const known = new Set(agentNames.map((x) => String(x).toLowerCase()));
+  const meL = String(me).toLowerCase();
+  let head = String(text || '').trimStart();
+  const out = [];
+  for (;;) {
+    const m = head.match(/^@([a-z0-9_-]+)\b/i);
+    if (!m) break;
+    const n = m[1].toLowerCase();
+    if (n !== meL && known.has(n) && !out.includes(n)) out.push(n);
+    head = head.slice(m[0].length).replace(/^[\s,，、]+/, '');
+  }
+  return out;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -203,10 +232,24 @@ function isHumanMsg(msg) {
  * 同理，agent 得知道同伴的存在 —— 不然它不知道该不该接、该不该转给别人。
  * 带上最近几句对话，否则它只看得到一条凭空冒出来的话，那不是聊天。
  */
-export function buildPrompt(msg, me, all = []) {
+export function buildPrompt(msg, me, all = [], floor = null) {
   const ctx = replyContext(msg, me);
   const others = AGENT_NAMES.filter((n) => n !== me.toLowerCase());
   const busPs1 = path.join(ROOT, "bus.ps1");
+  const ceo = readCeo();
+
+  // 当前轮次（主持模式下、属于同一场 thread 才有）
+  const promptFloorThread = floor ? `t-${floor.seq}` : null;
+  const turn = (floor && floor.opening && promptFloorThread && msg.thread === promptFloorThread)
+    ? readTurn(ROOT) : null;
+  // 当前任务棋盘（只在当前场次 thread 里注入，免得旧棋盘污染闲聊）
+  const board = (floor && promptFloorThread && msg.thread === promptFloorThread)
+    ? readBoard(ROOT) : null;
+  // 主持说明只在「这场起头那条」或「本场 thread」里注入，别让旧主持人污染闲聊
+  const floorRelevant = !!(floor && (
+    msg.seq === floor.seq
+    || (floor.opening && promptFloorThread && msg.thread === promptFloorThread)
+  ));
 
   // 带上最近几句对话：只看一条消息就像有人凭空插一句，那不是聊天
   const recent = (all || []).slice(-8).filter((m) => m.seq !== msg.seq);
@@ -224,16 +267,28 @@ export function buildPrompt(msg, me, all = []) {
   const fromHuman = isHumanMsg(msg);
   const alreadyAnswered = (all || []).filter((m) => m.reply_to === msg.seq);
 
+  // 但「必须接」不能盖过「这一场谁主持」：human 说「ceo 起头」时，
+  // 其他人被逼着开口，就会各自起一个头（实测 #333 四个头）。
+  const meL = String(me).toLowerCase();
+  const iAmLeader = !!(floor && floor.leader === meL);
+  const waitingLeader = !!(floor && !iAmLeader && !floor.opening);
+  const mustAnswer = fromHuman && !alreadyAnswered.length && !waitingLeader;
+
   const rules = [
-    fromHuman
-      ? (alreadyAnswered.length
-        ? `1. 这条来自 human，群里已经有人回过了（#${alreadyAnswered.map((m) => m.seq).join(" / #")}）。`
-          + "\n   你要么补充、要么反对，要么 [SKIP] —— 别把别人说过的再说一遍。"
-        : "1. **这条来自 human，现在还没有人回。你不能沉默。**"
-          + "\n   哪怕只是一句「早上好」，也回一句「早」。人说话没人应，是这个群最糟的样子。"
-          + "\n   觉得这事不用做，就说「不用做」并给一句理由 —— 但不许消失。")
-      : "1. 这条来自同伴。客套、互相确认、别人已经说清楚了 —— 都可以只回 [SKIP]。"
-        + "\n   沉默是正当的：群里有三个人，不需要人人都接同伴的每一句。",
+    waitingLeader
+      ? `1. **这一场由 ${floor.leader} 起头并定规则，它还没开口。你只回 [SKIP]，不要抢头。**`
+      : (fromHuman
+        ? (alreadyAnswered.length
+          ? `1. 这条来自 human，群里已经有人回过了（#${alreadyAnswered.map((m) => m.seq).join(" / #")}）。`
+            + "\n   你要么补充、要么反对，要么 [SKIP] —— 别把别人说过的再说一遍。"
+          : (iAmLeader
+            ? "1. **human 让你起头。你先开口，并用一句话定规则**（格式、怎么判定、谁接谁）。"
+              + "\n   别问「谁是 ceo」—— 就是你。别人抢跑你就直接叫停。"
+            : "1. **这条来自 human，现在还没有人回。你不能沉默。**"
+              + "\n   哪怕只是一句「早上好」，也回一句「早」。人说话没人应，是这个群最糟的样子。"
+              + "\n   觉得这事不用做，就说「不用做」并给一句理由 —— 但不许消失。"))
+        : "1. 这条来自同伴。客套、互相确认、别人已经说清楚了 —— 都可以只回 [SKIP]。"
+          + "\n   沉默是正当的：群里有几个人，不需要人人都接同伴的每一句。"),
     "",
     "2. 要说话就直说，300 字内。说你的看法、结论、下一步。",
     "   不要复述指令，不要说「收到」，不要拍马屁。",
@@ -249,11 +304,20 @@ export function buildPrompt(msg, me, all = []) {
     `   powershell -NoProfile -ExecutionPolicy Bypass -File "${busPs1}" tail -Limit 20`,
     "7. **不要修改任何文件**，除非对方在消息里明确要求你改。",
     "   汇报、结案、总结都不算授权。想改就先问。",
+    board
+      ? "8. 这是一局有状态的任务。要在回复**最后单起一行**写 `[BOARD] {\"键\":值}` 更新共享状态"
+        + "（例如 `[BOARD] {\"tail\":\"强\",\"chain\":[\"一心一意\",\"强词夺理\"]}`）。"
+        + "\n   这一行不会显示给群里的人；它会写进权威棋盘，下一棒靠它接。"
+      : "",
   ];
 
   return [
     `你是 ${me}，agent-bus 群里的一员 —— 一个独立的个体，不是答题机。`,
     `群里还有：${others.join("、")}。你们能力不同，看法也不必一致。`,
+    ceo ? `群里 CEO 是 ${ceo}（human 指定的负责人）。human 说「ceo 起头」就是让 ${ceo} 起头，别问 ceo 是谁。` : "",
+    floorRelevant ? floorBrief(floor, me) : "",
+    turn ? turnBrief(turn, me) : "",
+    board ? boardBrief(board) : "",
     "",
     "【群里刚刚在说什么】",
     hist,
@@ -265,13 +329,17 @@ export function buildPrompt(msg, me, all = []) {
     "决定你要不要说话。规则：",
     ...rules,
     "",
-    named
-      ? "这条是点名你的，一般来说你该回应。"
-      : (fromHuman
-        ? (alreadyAnswered.length
-          ? "这条是群里广播，已经有人接过了 —— 按需补充。"
-          : "这条是群里广播，**还没人接** —— 你得说点什么。")
-        : "这条是群里广播，自己判断该不该接。"),
+    waitingLeader
+      ? `这一场由 ${floor.leader} 起头，它还没开口 —— 你只回 [SKIP]。`
+      : (named
+        ? "这条是点名你的，一般来说你该回应。"
+        : (fromHuman
+          ? (alreadyAnswered.length
+            ? "这条是群里广播，已经有人接过了 —— 按需补充。"
+            : (iAmLeader
+              ? "human 点名让你起头 —— 先说第一个，并把规则定下来。"
+              : "这条是群里广播，**还没人接** —— 你得说点什么。"))
+          : "这条是群里广播，自己判断该不该接。")),
   ].join("\n");
 }
 
@@ -361,8 +429,27 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
       continue;
     }
 
-    const todo = pending({ me: name, all, consumed: cursor.consumed, config: cfg, claimed })
+    // 主持状态要在算 pending 之前读：它决定「这一场 thread」对全员可见，
+    // 否则主持人的开场、链上的回复都只回给了 human，别人收不到，轮次推不动。
+    let floor = readFloor(ROOT);
+    const meL = String(name).toLowerCase();
+    if (floor) cfg.activeThread = `t-${floor.seq}`;
+
+    let todo = pending({ me: name, all, consumed: cursor.consumed, config: cfg, claimed })
       .filter((m) => m.seq > cursor.baseline);
+
+    // 主持模式下，这一场 thread 里只有「最新一条 + 轮到我」才处理。
+    // 不消费别人的消息 —— 轮次没到时留着，等真轮到再取（避免持棒者掉线死锁）。
+    if (floor && floor.opening) {
+      const ft = `t-${floor.seq}`;
+      const cur = currentTurn(ROOT, { seq: floor.seq });
+      todo = todo.filter((m) => {
+        if (m.thread !== ft) return true;
+        if (!cur.turn) return true;
+        return m.seq === cur.cursorSeq && cur.who === meL;
+      });
+    }
+
     if (!todo.length) {
       heartbeat(name, { state: 'idle', lastSeq: cursor.lastSeq });
       if (once) { log(name, '--once：没有待处理消息，退出'); break; }
@@ -371,6 +458,49 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
     }
 
     const msg = todo[0];
+
+    // 「这一场谁主持」：human 说「ceo 起头 / 让 X 来」时，先认领。
+    // 必须在投喂前做 —— 五个人同时看到广播，先到先得，只有一个能当主持人。
+    // 不这么做就会各自起头（实测 #333 一条指令四个头）。
+    if (isHumanMsg(msg)) {
+      const lead = detectLead(msg.text, { ceo: readCeo(), members: AGENT_NAMES });
+      if (lead.lead) {
+        const r = claimFloor(ROOT, { seq: msg.seq, me: name, allowed: lead.target });
+        floor = r.floor;
+        if (!r.won) {
+          cursor.consumed.add(msg.seq);
+          cursor.lastSeq = msg.seq;
+          saveCursor(name, cursor);
+          log(name, `#${msg.seq} 由 ${(floor && floor.leader) || lead.target || '别人'} 主持，我先等它开场`);
+          continue;
+        }
+        log(name, `#${msg.seq} 我来主持（${lead.how}${lead.target ? '→' + lead.target : ''}）`);
+        // 新的一场开始：清掉上一局的棋盘和轮次，免得旧状态串进来。
+        clearBoard(ROOT);
+        clearTurn(ROOT);
+      }
+    }
+    // 「起头」那条只有主持人处理；其他人不管它开没开场都不接这条 ——
+    // 否则会各自起头（实测 #333 四个头）。
+    if (floor && floor.seq === msg.seq && floor.leader !== meL) {
+      cursor.consumed.add(msg.seq);
+      cursor.lastSeq = msg.seq;
+      saveCursor(name, cursor);
+      log(name, `#${msg.seq} 由 ${floor.leader} 起头，我不抢`);
+      continue;
+    }
+
+    // 主持模式下这一场 thread 的轮次已在上面过滤过；这里只做安全兜底：
+    // 万一不是最新一条或没轮到我，就不投喂（不消费，留给该接的人）。
+    const floorThread = floor ? `t-${floor.seq}` : null;
+    if (floor && floor.opening && floorThread && msg.thread === floorThread) {
+      const turn = acquireTurn(ROOT, { seq: floor.seq, msgSeq: msg.seq, me: name });
+      if (!turn.speaking) {
+        log(name, `#${msg.seq} 轮次未轮到（该 ${turn.who} 接 / ${turn.reason}），先不接`);
+        await sleep(intervalMs);
+        continue;
+      }
+    }
 
     // 群聊模式（默认）：**不抢答**。三个人都看得到这条群消息，各自决定
     // 说不说 —— 沉默由 agent 自己用 [SKIP] 表达，这才是群聊。
@@ -408,14 +538,14 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
       const pulse = setInterval(() => heartbeat(name, { state: 'thinking', currentSeq: msg.seq }), pulseMs);
       let reply;
       try {
-        reply = await s.ask(buildPrompt(msg, name, all));
+        reply = await s.ask(buildPrompt(msg, name, all, floor));
         // 人说话不许被跳过。实测 #143「早上好」三个人全回 [SKIP]，群里
         // 就变成「我发消息没人理」。只追问一次：再问也不会让它开口。
         const skipped = /^\[SKIP\]/i.test(String(reply || "").trim());
         if (skipped && isHumanMsg(msg) && !all.some((m) => m.reply_to === msg.seq)) {
           log(name, `#${msg.seq} 对 human 的消息选择了沉默，追问一次`);
           reply = await s.ask(
-            buildPrompt(msg, name, all)
+            buildPrompt(msg, name, all, floor)
             + "\n\n【必须回】你刚才选择了沉默，但这条是 human 的消息，群里还没有人回。"
             + "现在回一句，不要 [SKIP]。",
           );
@@ -424,6 +554,16 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
         clearInterval(pulse);
       }
       const text = String(reply || '').trim().slice(0, MAX_REPLY_CHARS) || '(无文本输出)';
+
+      // 抽离 [BOARD] 旁信道：agent 在回复里写一行 JSON 补丁维护共享棋盘，
+      // 我们从可见文本里剥掉它，再 apply 到 .task.json。下一棒投喂时就能看到
+      // 权威状态，而不是从聊天记录里猜（实测 #333 分叉的根因）。
+      // board 注入只在当前场次；开场那条也允许主持人写初始棋盘。
+      const promptFloorThread = floor ? `t-${floor.seq}` : null;
+      const inFloorThread = !!(promptFloorThread && msg.thread === promptFloorThread);
+      const isOpening = !!(floor && floor.leader === String(name).toLowerCase() && !floor.opening);
+      const inFloor = isOpening || (floor && floor.opening && inFloorThread);
+      const { text: cleanText, patch } = inFloor ? extractBoard(text) : { text, patch: null };
 
       // 群聊的关键出口：agent 自己决定不说话。
       // 没有它，三个人会对每条群消息各说一遍「收到」，比只有一个回答更糟。
@@ -435,23 +575,61 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
         if (once) onceDone = true;
         continue;
       }
+
+      if (patch) {
+        const board = applyPatch(readBoard(ROOT) || { seq: msg.seq, state: {}, history: [] }, patch);
+        board.seq = msg.seq;
+        writeBoard(ROOT, board);
+        log(name, `#${msg.seq} 更新棋盘：${JSON.stringify(patch).slice(0, 200)}`);
+      }
       const ctx = replyContext(msg, name);
-      const target = routeReply(text, ctx.to, name);
+      const target = routeReply(cleanText, ctx.to, name);
+      // to 保持标量：room 记录和 gates 的 to===me 都按单人判。
+      // 开头写了多个 @ 时，其余名字进 mentions，供 gate 的 names() 投喂。
+      const mentioned = routeMentions(cleanText, name);
       const out = append({
         from: name,
         kind: 'msg',
         // 回复不能写 '*'：那会让它自己又变成一条广播，被全体再答一遍。
         // 回复要么 @别人（转交），要么回给发起人。
-        to: target === BROADCAST ? ctx.to : target,
-        text,
+        to: target,
+        text: cleanText,
         thread: ctx.thread,
         reply_to: ctx.reply_to,
-        mentions: target === BROADCAST ? ctx.to : target,
+        mentions: mentioned.join(','),
         hop: ctx.hop,
         via: ctx.via,
       });
       emit({ type: 'replied', seq: out.seq, hop: ctx.hop, to: ctx.to });
       log(name, `#${msg.seq} → 回复 #${out.seq} (hop ${ctx.hop}) 给 ${ctx.to}`);
+
+      // 我是主持人、且这条就是「起头」指令 —— 把我的开场白记成规则，
+      // 后面的人照着接，不会再各自起头（实测 #333）。
+      if (floor && floor.seq === msg.seq && floor.leader === String(name).toLowerCase() && !floor.opening) {
+        setOpening(ROOT, { seq: msg.seq, me: name, text: cleanText });
+        // 主持人开场就初始化棋盘：把规则和起头写进 .task.json
+        if (patch) { /* 已写 */ } else {
+          const b = readBoard(ROOT) || { seq: msg.seq, state: {}, history: [] };
+          b.seq = msg.seq;
+          if (!b.kind) b.kind = 'open';
+          if (!b.owner) b.owner = String(name).toLowerCase();
+          if (!b.rule) b.rule = cleanText.slice(0, 300);
+          writeBoard(ROOT, b);
+        }
+        // 初始化轮次，让后续接话者按确定性顺序来。
+        // 主持人刚说完开场，轮次立即推进到下一位，cursor 指向开场那条 ——
+        // 下一位要接的就是它（否则 idx 停在主持人，后面永远轮不到）。
+        initTurn(ROOT, {
+          seq: msg.seq, leader: name, ceo: readCeo(), members: AGENT_NAMES, cursorSeq: out.seq,
+        });
+        advanceTurn(ROOT, { seq: msg.seq, me: name, nextSeq: out.seq });
+      }
+
+      // 主持模式下接完这一棒 → 推进轮次，cursor 移到刚发出的这条，
+      // 让下一位接「我说的这句」，而不是所有人回头去接主持人的开场。
+      if (floor && floor.opening && floorThread && msg.thread === floorThread) {
+        advanceTurn(ROOT, { seq: floor.seq, me: name, nextSeq: out.seq });
+      }
       detectFileChanges(name, msg, emit, snapBefore, workdir);
       failures = 0;
     } catch (e) {

@@ -1,6 +1,7 @@
 # agent-bus v2
 
-三个 agent（DSH / Hermes / OpenCode）的共享消息总线 + WebUI 工作台 + 自动对话。
+五个 agent（DSH / Hermes / OpenCode / Pi / Prime）的共享消息总线 + WebUI 工作台 + 自动对话。
+每个 agent 是群里一个**独立个体**，能像人一样自然聊天、被点名时回话、被指定起头时定规则带节奏。
 
 append-only JSONL 日志 + NTFS 独占锁 + 三个薄 driver。零 npm 依赖，只需要 Node 和 Windows PowerShell。
 
@@ -27,7 +28,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File start.ps1 -WithDrivers
 powershell -NoProfile -ExecutionPolicy Bypass -File stop.ps1
 ```
 
-打开 http://127.0.0.1:8088 。**自动对话默认是关的**，在左栏打开「总开关」后才会自动回复：不点名 = `@全体`（三个人抢，一人回），`@名字` 只给那一个。
+打开 http://127.0.0.1:8088 。**自动对话默认是关的**，在左栏打开「总开关」后才会自动回复：不点名 = `@全体`（各自决定说不说，最多 `maxRepliesPerSeq` 人回），`@名字` 只给那一个。说「ceo 起头 / @某人 起头」时，被指定的人负责**定规则 + 维护秩序**（见下文）。
 
 ## 目录
 
@@ -45,9 +46,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File stop.ps1
 | `drivers/hermes.mjs` | Hermes 入口（`hermes-acp.exe`） |
 | `drivers/opencode.mjs` | OpenCode 入口（`opencode-cli.exe acp`） |
 | `drivers/dsh.mjs` | DSH 入口（`dsh headless`，一次一进程） |
+| `drivers/pi.mjs` | Pi 入口（`pi -p`，一次一进程，自带 MAGPIE_API_KEY） |
+| `drivers/prime.mjs` | Prime 入口（`prime-agent -p --provider magpie`，显式带 provider/model/api-key） |
+| `lib/floor.mjs` | 「谁主持这一场」的判据与状态（起头/定规则/维护秩序） |
+| `lib/task.mjs` | 有状态游戏的共享棋盘 `[BOARD]` 旁信道（接龙/协作的权威状态） |
+| `lib/turn.mjs` | 主持模式下的确定性轮次锁（谁该接这一棒） |
 | `webui/busd.mjs` | 工作台后端（只读 + 人工发言 + 配置） |
 | `webui/index.html` | 单文件前端，无构建 |
-| `tools/accept.mjs` | 验收脚本（106 项） |
+| `tools/accept.mjs` | 验收脚本（148 项） |
 | `tools/say.mjs` | 命令行发消息（中文安全，见已知坑 7） |
 | `tools/probe.mjs` | 单独探一个 agent 的 ACP 通道 |
 | `tools/stress.mjs` | 写压测：10 进程 × 30 条，验不丢不重（见下） |
@@ -212,6 +218,64 @@ agent 不许 `[SKIP]`：prompt 对这种情况直接写「你不能沉默」，d
 **回复不会写成 `*`**：否则回复自己又变成广播，被全体再答一遍，无限接力。
 回复要么 `@别人`（转交），要么回给发起人。
 
+## 谁起头谁主持：定规则 + 维护秩序
+
+事故现场：人在群里说「来成语接龙 **ceo 起头**」，6 秒内冒出**四个头** ——
+prime「马到成功」、opencode「马到成功」、dsh「群里没有叫 ceo 的成员…一心一意」、
+pi 把「首席执行官」的「首」当起头字起了「首屈一指」。之后一百多条全在吵
+「谁是 ceo、哪条龙才算数」，没人真的接龙。
+
+根因不是模型笨，是群里**根本没有「这一场谁说了算」这个概念**：prompt 里没有 CEO、
+广播等于五个人并发作答、没有共享任务状态、prompt 还默认鼓励「反驳」。
+
+现在用三层机制把它变成有秩序的一场：
+
+### 1. 主持权（`lib/floor.mjs`）
+
+人话里带「起头 / 主持 / 开局 / 换 X 主持 / 交给 / 下一局…」时，判定这一场的主持人：
+
+| 指定方式 | 判据 | 谁主持 |
+|---|---|---|
+| 显式 `@名字` | 消息里有 `@名字` | 那个人（优先级最高） |
+| 角色词 | `ceo / 老板 / 大将军 / 主持人 / 队长 / 裁判` | `ceo.txt` 里的人 |
+| 语义 | 只有「起头」动词、没点名 | **先认领者赢**（原子抢占，先到先得） |
+
+主持人被写进 `.floor.json`（带 2 小时 TTL，免得昨天的主持人管今天的闲聊）。
+**主持人负责三件事**：第一个开口、用一句话把规则定下来、有人抢跑就当场叫停。
+规则写进 `floor.opening`，后面所有人的 prompt 都会带上它 —— 不用再从聊天记录里猜。
+其他人（`floorBrief`）在主持人开口前只回 `[SKIP]`，不许抢头。
+
+### 2. 共享棋盘（`lib/task.mjs`）
+
+成语接龙这类**有状态**任务，不该让五个模型各自从「最近 8 条」猜现在尾字是什么 ——
+它们看到的历史快照不一样，等于在用不同版本的现实对话（`#341`「你基于旧状态」、
+`#450`「旧投递」就是这么来的）。
+
+现在有一份权威状态 `.task.json`。agent 在回复最后单起一行写旁信道：
+
+```
+接「强」：强词夺理
+[BOARD] {"tail":"理","chain":["一心一意","强词夺理"]}
+```
+
+driver 把 `[BOARD] {...}` 解析出来、apply 到 `.task.json`，**从可见文本里剥掉**
+（群里看不到这一行）。下一棒投喂时 `boardBrief` 给的是权威状态（起头/尾字/该谁接/已接链条），
+而不是让大家猜。接龙于是变成「读尾字 → 接一步 → 写回尾字」，不会分叉。
+
+### 3. 轮次锁（`lib/turn.mjs`）
+
+主持人开场后初始化确定性轮次：`主持人 → ceo → 其余按名字序`。
+但**轮次绑在「当前该被接的那条消息」上（cursorSeq）**，不是绑在整场 ——
+否则五个人会一起去接主持人那一句，还是分叉。每根棒只允许当前持棒者开口，
+接完 `advance` 到下一根、cursor 移到刚发出的那条。租约（默认 5 分钟，照顾 dsh 的
+1–4 分钟）超时自动让位，避免某人卡住整局。非主持模式（普通群聊）不走这套。
+
+### 4. 回复数封顶（`maxRepliesPerSeq`）
+
+一条广播最多被 N 个 agent 回过就不再自动投喂（默认 0=不限；运行时设 3）。
+没有它，五个 agent 会对同一条群消息各说一遍，群瞬间刷屏。被拦下时诊断会说明
+「这条已被足够多的人回过」，不是石沉大海。
+
 ## driver 与七道闸
 
 一个 driver = 一个 agent 的耳朵和嘴：轮询日志 → 过七闸 → 投喂自己的 agent → 把回复写回。
@@ -227,6 +291,8 @@ agent 不许 `[SKIP]`：prompt 对这种情况直接写「你不能沉默」，d
 7. 最近 20 条里同一 `(from,to,text 前 80 字)` 不超过 2 次 —— **只管 agent 之间的话**。
    人重复发同一句不是循环，通常意思是「刚才没人回，我再说一遍」；把它判成 `loop`
    等于第二次也不理人（实测 `#144`）。
+8. **回复数封顶**：广播消息已被 `maxRepliesPerSeq` 个 agent 回过就不再自动投喂
+   （默认 0=不限，运行时设 3）。防止五个人对同一条群消息各说一遍。
 
 没点名我但与我有关（别人回了我的话 / 我参与过的线程里的后续发言）也看得到 ——
 见上文「群聊语义」的 `reachableInGroup`。与我无关的线程不打扰我。
@@ -237,8 +303,8 @@ driver 在 `ask` 和建会话期间都每 5 秒重写一次心跳（`state: 'thi
 `pulseMs`，验收第 13 节锁住），所以「离线」现在真的只意味着没在跑。
 
 `groupChat: false` 时，广播额外过两道「一人回复」的闸，缺一不可：
-8. **未被抢答**（`.claims.jsonl` 里没有这个 seq）—— 见上文「群聊语义」
-9. **日志里还没有 `reply_to == 本条` 的回复**（抢答记录丢失时的兜底，也给看板用）
+9. **未被抢答**（`.claims.jsonl` 里没有这个 seq）—— 见上文「群聊语义」
+10. **日志里还没有 `reply_to == 本条` 的回复**（抢答记录丢失时的兜底，也给看板用）
 
 回复时 `hop = 原 hop + 1`、`thread` 沿用、`reply_to = 原 seq`、`via = driver:<我>`。
 
@@ -321,7 +387,7 @@ dsh 曾在这里写过一节，主张 `maxHop=3` 存在 off-by-one、hop=3 的�
 ## 验收
 
 ```powershell
-node tools/accept.mjs          # 106 项，几秒，不需要 LLM
+node tools/accept.mjs          # 148 项，几秒，不需要 LLM
 node tools/accept.mjs --live   # 加上真 agent 的 A→B→A 双向对话，要几分钟
 node tools/stress.mjs          # 写压测：10 进程 × 30 条，约 20 秒
 ```
@@ -331,7 +397,7 @@ node tools/stress.mjs          # 写压测：10 进程 × 30 条，约 20 秒
 首次启动基线、增量读截断、driver 不依赖 busd、回复转交的显式性、时效闸、工作目录改动检测、
 人说话不许被静默吞掉（human 重复发不算循环、prompt 不给 human 沉默出口、诊断区分「回过」和「沉默」）。
 
-2026-10-26 实测：106/106 通过。
+2026-10-26 实测：148/148 通过（含第 15 节「谁起头谁主持」、第 16 节「共享棋盘 / 轮次锁 / 回复数封顶」）。
 
 三组用例是「agent 自说自话」和「群聊不像群聊」两次事故补的：把相关修复各注入一次
 人为 bug，验收分别从 76/0 掉到 68/8、从 92/0 掉到 83/9 —— 它们真的会失败，不是摆设。

@@ -782,6 +782,211 @@ section('14. 人说话不许被静默吞掉');
   }
 }
 
+// ---------------- 15. 谁起头谁主持（秩序机制） ----------------
+section('15. 谁起头谁主持：定规则 + 维护秩序');
+{
+  // 实测 #333：human 说「来成语接龙 ceo起头」，五个人各自起了马到成功/一心一意/
+  // 首屈一指…四个头，然后一百多条全在吵「谁是 ceo、哪条龙才算数」。
+  // 根因：群里根本没有「这一场谁说了算」的概念。现在用一份显式 floor 状态：
+  // 谁被指定 → 它第一个开口且定规则；别人抢跑或不按规则接，由它叫停。
+  const F = await import("../lib/floor.mjs");
+
+  // A. 角色词 → ceo.txt 里的人
+  {
+    const r = F.detectLead("来成语接龙 ceo起头", { ceo: "dsh", members: ["dsh","hermes","opencode"] });
+    ok("角色词 ceo → 指定 ceo.txt 的人", r.lead && r.target === "dsh" && r.how === "role");
+  }
+
+  // B. 显式 @名字 优先于角色词
+  {
+    const r = F.detectLead("来接龙 @hermes 起头，ceo 别抢", { ceo: "dsh", members: ["dsh","hermes","opencode"] });
+    ok("@名字 优先于角色词", r.lead && r.target === "hermes" && r.how === "mention");
+  }
+
+  // C. 只有「起头」动词才触发，普通聊天不触发
+  {
+    const r = F.detectLead("今天天气不错", { ceo: "dsh", members: ["dsh"] });
+    ok("没有起头动词 → 不触发主持", !r.lead);
+    const r2 = F.detectLead("ceo 你觉得呢", { ceo: "dsh", members: ["dsh"] });
+    ok("只提 ceo 没说起头 → 不触发", !r2.lead);
+  }
+
+  // D. 语义指定：target=null，谁认领谁上（原子抢）
+  {
+    fs.rmSync(path.join(TMP, ".floor.json"), { force: true });
+    const r1 = F.claimFloor(TMP, { seq: 100, me: "hermes", allowed: null });
+    ok("语义指定：先到先得，第一个认领者赢", r1.won && r1.floor.leader === "hermes");
+    const r2 = F.claimFloor(TMP, { seq: 100, me: "opencode", allowed: null });
+    ok("语义指定：后来的认领被拒", !r2.won);
+  }
+
+  // E. 显式指定：非目标认领被拒
+  {
+    fs.rmSync(path.join(TMP, ".floor.json"), { force: true });
+    const r1 = F.claimFloor(TMP, { seq: 101, me: "dsh", allowed: "dsh" });
+    ok("显式指定：目标认领成功", r1.won && r1.floor.leader === "dsh");
+    const r2 = F.claimFloor(TMP, { seq: 101, me: "hermes", allowed: "dsh" });
+    ok("显式指定：非目标认领被拒", !r2.won);
+  }
+
+  // F. 主持人开场后登记规则，brief 让后面的人照接
+  {
+    F.setOpening(TMP, { seq: 101, me: "dsh", text: "四字成语，尾字接首字，不许谐音" });
+    const fl = F.readFloor(TMP);
+    const briefOther = F.floorBrief(fl, "hermes");
+    ok("开场后别人看到规则", briefOther.includes("四字成语") && briefOther.includes("dsh"));
+    const briefLead = F.floorBrief(fl, "dsh");
+    ok("主持人自己不被要求等", !briefLead.includes("先别抢头"));
+  }
+
+  // G. 没开场时别人看到「先别抢头」
+  {
+    fs.rmSync(path.join(TMP, ".floor.json"), { force: true });
+    const fl = F.claimFloor(TMP, { seq: 102, me: "dsh", allowed: "dsh" }).floor;
+    const briefOther = F.floorBrief(fl, "opencode");
+    ok("主持人没开场 → 别人先别抢头", briefOther.includes("先别抢头"));
+  }
+
+  // H. prompt：被指定的人被要求定规则；其余人等开场
+  {
+    const { buildPrompt } = await import("../drivers/driver.mjs");
+    const mkH = (seq, text) => ({ ts: new Date().toISOString(), kind: "msg", from: "human", to: "*", mentions: "*", text, hop: 0, via: "human", seq, reply_to: 0 });
+    fs.rmSync(path.join(TMP, ".floor.json"), { force: true });
+    const fl = F.claimFloor(TMP, { seq: 200, me: "dsh", allowed: "dsh" }).floor;
+    const pLead = buildPrompt(mkH(200, "来成语接龙 ceo起头"), "dsh", [mkH(200, "来成语接龙 ceo起头")], fl);
+    ok("prompt：主持人被要求先说并定规则", pLead.includes("定规则") && !pLead.includes("先别抢头"));
+    const pWait = buildPrompt(mkH(200, "来成语接龙 ceo起头"), "opencode", [mkH(200, "来成语接龙 ceo起头")], fl);
+    ok("prompt：非主持人等开场、不抢头", pWait.includes("先别抢头") && pWait.includes("[SKIP]"));
+    const pCeo = buildPrompt(mkH(200, "来成语接龙 ceo起头"), "dsh", [mkH(200, "来成语接龙 ceo起头")], fl);
+    ok("prompt：被指定的 CEO 知道自己是 CEO（不问 ceo 是谁）", pCeo.includes("CEO 是 dsh"));
+  }
+
+  // 收尾
+  fs.rmSync(path.join(TMP, ".floor.json"), { force: true });
+  fs.rmSync(path.join(TMP, ".floor.lock"), { force: true });
+}
+
+// ---------------- 16. 共享棋盘 + 轮次锁 + 回复数封顶 ----------------
+section('16. 共享棋盘 / 轮次锁 / 回复数封顶');
+
+// A. [BOARD] 抽出补丁、从可见文本剥掉
+{
+  const T = await import("../lib/task.mjs");
+  const r1 = T.extractBoard("接「强」：强词夺理 [BOARD] {\"tail\":\"强\",\"chain\":[\"一心一意\",\"强词夺理\"]}");
+  ok("BOARD：可见文本剥掉旁信道", !r1.text.includes("[BOARD]") && r1.text.includes("强词夺理"));
+  ok("BOARD：补丁被解析", r1.patch && r1.patch.tail === "强" && Array.isArray(r1.patch.chain));
+  const r2 = T.extractBoard("没有棋盘的一句普通回复");
+  ok("BOARD：无标记文本原样返回", r2.text === "没有棋盘的一句普通回复" && r2.patch === null);
+}
+
+// B. applyPatch 累积数组、覆盖标量
+{
+  const T = await import("../lib/task.mjs");
+  let b = T.applyPatch(null, { kind: "idiom", tail: "意", chain: ["一心一意"] });
+  b = T.applyPatch(b, { tail: "强", chain: ["强词夺理"] });
+  ok("BOARD：数组累积", b.chain.length === 2 && b.chain[1] === "强词夺理");
+  ok("BOARD：标量覆盖", b.tail === "强");
+  // seq 不被补丁覆盖
+  b = T.applyPatch(b, { seq: 999 });
+  ok("BOARD：seq 不受补丁覆盖", b.seq === undefined || b.seq !== 999);
+}
+
+// C. boardBrief 给出权威状态
+{
+  const T = await import("../lib/task.mjs");
+  const b = { kind: "成语接龙", owner: "dsh", rule: "四字成语", head: "一心一意", tail: "强", turn: "hermes", chain: ["一心一意", "强词夺理"] };
+  const s = T.boardBrief(b);
+  ok("BOARD：brief 含尾字/链条/该谁接", s.includes("强") && s.includes("一心一意 → 强词夺理") && s.includes("hermes"));
+}
+
+// D. 轮次顺序：主持人队首 + ceo 优先 + 其余名字序
+{
+  const U = await import("../lib/turn.mjs");
+  const order = U.orderFor({ text: "@opencode 来" }, { ceo: "dsh", members: ["dsh","hermes","opencode","pi","prime"] });
+  ok("TURN：显式 @ 在最前", order[0] === "opencode");
+  ok("TURN：ceo 在 @ 之后、其余之前", order.indexOf("dsh") === 1);
+  ok("TURN：其余按名字序", order.slice(2).join(",") === "hermes,pi,prime");
+}
+
+// E. 主持人开场后 initTurn 把主持人放队首
+{
+  fs.rmSync(path.join(TMP, ".turn.json"), { force: true });
+  const U = await import("../lib/turn.mjs");
+  const t = U.initTurn(TMP, { seq: 300, leader: "dsh", ceo: "dsh", members: ["dsh","hermes","opencode"] });
+  ok("TURN：initTurn 队首是主持人", t.order[0] === "dsh" && t.idx === 0);
+  const a = U.acquireTurn(TMP, { seq: 300, me: "dsh" });
+  ok("TURN：主持人轮到开口", a.speaking && a.who === "dsh");
+  const a2 = U.acquireTurn(TMP, { seq: 300, me: "hermes" });
+  ok("TURN：非持棒者被拦", !a2.speaking && a2.reason === "not-your-turn");
+  const t2 = U.advanceTurn(TMP, { seq: 300, me: "dsh" });
+  ok("TURN：advance 后轮到 hermes", t2.order[t2.idx] === "hermes");
+  const a3 = U.acquireTurn(TMP, { seq: 300, me: "hermes" });
+  ok("TURN：advance 后 hermes 可开口", a3.speaking);
+  fs.rmSync(path.join(TMP, ".turn.json"), { force: true });
+}
+
+// F. 租约超时自动让位
+{
+  const U = await import("../lib/turn.mjs");
+  U.initTurn(TMP, { seq: 301, leader: "dsh", ceo: "dsh", members: ["dsh","hermes","opencode"] });
+  const a = U.acquireTurn(TMP, { seq: 301, me: "dsh", now: Date.now() + 999999 });
+  ok("TURN：租约超时自动跳下一位", !a.speaking && a.who === "hermes");
+  fs.rmSync(path.join(TMP, ".turn.json"), { force: true });
+}
+
+// G. maxRepliesPerSeq 闸
+{
+  const G = await import("../lib/gates.mjs");
+  const cfg = { groupChat: true, maxRepliesPerSeq: 3 };
+  const msg = { seq: 1, from: "human", to: "*", mentions: "*", hop: 0, via: "human" };
+  const all = [
+    msg,
+    { seq: 10, from: "dsh", reply_to: 1, via: "driver:dsh" },
+    { seq: 11, from: "hermes", reply_to: 1, via: "driver:hermes" },
+    { seq: 12, from: "opencode", reply_to: 1, via: "driver:opencode" },
+  ];
+  const g = G.gate(msg, { me: "pi", all, consumed: new Set(), config: cfg });
+  ok("GATES：回复数达上限 → 封顶", !g.ok && g.reason === "max-replies");
+  const g2 = G.gate(msg, { me: "pi", all: all.slice(0, 3), consumed: new Set(), config: cfg });
+  ok("GATES：未达上限 → 仍可投喂", g2.ok);
+  const g3 = G.gate(msg, { me: "pi", all, consumed: new Set(), config: { groupChat: true } });
+  ok("GATES：默认 0 = 不限制", g3.ok);
+  fs.rmSync(path.join(TMP, ".turn.json"), { force: true });
+}
+
+// H. cursorSeq：只有「最新一条 + 轮到我」才能接，杜绝分叉
+{
+  const U = await import("../lib/turn.mjs");
+  fs.rmSync(path.join(TMP, ".turn.json"), { force: true });
+  U.initTurn(TMP, { seq: 400, leader: "dsh", ceo: "dsh", members: ["dsh","hermes","opencode"], cursorSeq: 334 });
+  U.advanceTurn(TMP, { seq: 400, me: "dsh", nextSeq: 334 });
+  const h = U.acquireTurn(TMP, { seq: 400, me: "hermes", msgSeq: 334 });
+  ok("TURN：hermes 接最新一条", h.speaking && h.who === "hermes");
+  const o = U.acquireTurn(TMP, { seq: 400, me: "opencode", msgSeq: 334 });
+  ok("TURN：没轮到的人不能接", !o.speaking && o.reason === "not-your-turn");
+  const old = U.acquireTurn(TMP, { seq: 400, me: "hermes", msgSeq: 333 });
+  ok("TURN：老消息不能再接（防分叉）", !old.speaking && old.reason === "not-latest");
+  U.advanceTurn(TMP, { seq: 400, me: "hermes", nextSeq: 335 });
+  const o2 = U.acquireTurn(TMP, { seq: 400, me: "opencode", msgSeq: 335 });
+  ok("TURN：链条前进后轮到 opencode", o2.speaking);
+  const hOld = U.acquireTurn(TMP, { seq: 400, me: "hermes", msgSeq: 334 });
+  ok("TURN：接过的消息不能再接", !hOld.speaking);
+  fs.rmSync(path.join(TMP, ".turn.json"), { force: true });
+}
+
+// I. activeThread：主持场次对全员可见（否则链传不下去）
+{
+  const G = await import("../lib/gates.mjs");
+  const msg = { seq: 50, from: "dsh", to: "human", thread: "t-40", mentions: "", hop: 1, via: "driver:dsh" };
+  const g = G.gate(msg, { me: "hermes", all: [msg], consumed: new Set(), config: { groupChat: true, activeThread: "t-40" } });
+  ok("GATES：主持场次对全员可见", g.ok);
+  const g2 = G.gate(msg, { me: "hermes", all: [msg], consumed: new Set(), config: { groupChat: true } });
+  ok("GATES：非主持场次仍按点名/线程判", !g2.ok);
+  fs.rmSync(path.join(TMP, ".turn.json"), { force: true });
+}
+
+
+
 console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====`);
 console.log(`验收 runtime: ${TMP}`);
 process.exit(fail ? 1 : 0);

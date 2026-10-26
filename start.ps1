@@ -46,6 +46,9 @@ if ($WithDrivers) {
   # 但它是 ACP 那条路唯一能跑通的：无头环境拿不到桌面端的 device grant，
   # ACP 会报 no API key for provider route "deepseek-official"。
   Start-Bg -Name 'driver-dsh' -ArgList @('drivers/dsh.mjs')
+  # pi / prime 都是 `-p` 一次性模式（每轮 spawn 一个进程），没有会话可续
+  Start-Bg -Name 'driver-pi' -ArgList @('drivers/pi.mjs')
+  Start-Bg -Name 'driver-prime' -ArgList @('drivers/prime.mjs')
 }
 
 Write-Output ""
