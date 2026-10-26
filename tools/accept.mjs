@@ -1047,28 +1047,26 @@ section('16. 共享棋盘 / 轮次锁 / 回复数封顶');
   ok("GATES：主持场次也受 floorMaxHop 封顶", !g3.ok && g3.reason === "hop-limit", g3.reason || "");
 }
 
-// J3. 人喊停后旧 thread 不再被自动接（实测 #528 喊停后 #530 仍在接龙）
+// J3. 人喊停后旧 thread：只准回人的「停」，不准 agent 之间再接/辩论
 {
   const G = await import("../lib/gates.mjs");
-  // 旧链条上的一条 agent 消息（thread=t-520，已停）
-  const msg = { seq: 530, from: "opencode", to: "hermes", thread: "t-520", mentions: "", hop: 8, via: "driver:opencode" };
-  const gOpen = G.gate(msg, {
-    me: "hermes", all: [msg], consumed: new Set(),
-    config: { groupChat: true, activeThread: "t-520", stoppedThreads: ["t-520"] },
-  });
-  ok("GATES：停过的 thread 自动回话被封（即使 activeThread 还在）", !gOpen.ok && gOpen.reason === "thread-stopped", gOpen.reason || "");
-  // 人的消息不受这条闸限制：人之后还能点名某人继续/新开
-  const human = { seq: 531, from: "human", to: "*", thread: "t-520", mentions: "*", hop: 0, via: "human" };
-  const gH = G.gate(human, {
-    me: "hermes", all: [human], consumed: new Set(),
-    config: { groupChat: true, activeThread: "t-520", stoppedThreads: ["t-520"] },
-  });
+  const cfg = (extra = {}) => ({ groupChat: true, activeThread: "t-520", stoppedThreads: ["t-520"], floorMaxHop: 40, ...extra });
+  // agent 之间在停过的 thread 里对聊（接龙尾巴/辩论）→ 封
+  const agentReply = { seq: 530, from: "opencode", to: "hermes", thread: "t-520", mentions: "", hop: 8, via: "driver:opencode" };
+  const gA = G.gate(agentReply, { me: "hermes", all: [agentReply], consumed: new Set(), config: cfg() });
+  ok("GATES：停过的 thread 里 agent 对聊被封", !gA.ok && gA.reason === "thread-stopped", gA.reason || "");
+  // agent 直接回人的「停」（一句「好，停了」）→ 放行，否则人喊停像被吞。
+  // 注意：gate 的 msg 是「被考虑的回复」，me 是「要不要回它的人」，所以
+  // 这条 agent 回复里 from 是 opencode、me 用 hermes（另一个 agent 来判断）。
+  const humanStop = { seq: 579, from: "human", to: "*", thread: "t-520", mentions: "*", hop: 0, via: "human" };
+  const ack = { seq: 580, from: "opencode", to: "human", thread: "t-520", mentions: "", hop: 1, reply_to: 579, via: "driver:opencode" };
+  const gAck = G.gate(ack, { me: "hermes", all: [humanStop, ack], consumed: new Set(), config: cfg() });
+  ok("GATES：停过的 thread 里 agent 直接回人的「停」放行", gAck.ok, gAck.reason || "");
+  // 人的消息不受这条闸限制（人可点名/新开）
+  const gH = G.gate(humanStop, { me: "hermes", all: [humanStop], consumed: new Set(), config: cfg() });
   ok("GATES：人喊停后仍能在同 thread 点名（人的消息不受封）", gH.ok, gH.reason || "");
   // 没停的 thread 不受影响
-  const gLive = G.gate(msg, {
-    me: "hermes", all: [msg], consumed: new Set(),
-    config: { groupChat: true, activeThread: "t-520", floorMaxHop: 40 },
-  });
+  const gLive = G.gate(agentReply, { me: "hermes", all: [agentReply], consumed: new Set(), config: { groupChat: true, activeThread: "t-520", floorMaxHop: 40 } });
   ok("GATES：没停的 thread 照常可接", gLive.ok, gLive.reason || "");
 }
 

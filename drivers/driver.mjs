@@ -583,6 +583,23 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
       }
       const text = String(reply || '').trim().slice(0, MAX_REPLY_CHARS) || '(无文本输出)';
 
+      // 终检：ask 可能耗时 1–4 分钟，期间人可能喊停 / 别人可能先回。再判一次，
+      // 一旦这条 thread 被停（thread-stopped）就把在途回复丢掉，不投喂。
+      // 否则人喊停后还会冒出旧链的尾巴（实测 #581 在 #579 停令后仍在接）。
+      // 注意：不能用完整 gate(msg)——msg 此刻已在 cursor.consumed，会误拦。
+      // 这里只针对「停过的 thread」这一条做兜底。
+      {
+        const cfgNow = readConfig();
+        const stoppedNow = Array.isArray(cfgNow.stoppedThreads) ? cfgNow.stoppedThreads : [];
+        if (msg.thread && msg.thread.startsWith("t-") && stoppedNow.includes(msg.thread)) {
+          log(name, `#${msg.seq} 终检：thread ${msg.thread} 已被人喊停，丢弃在途回复，不投喂`);
+          detectFileChanges(name, msg, emit, snapBefore, workdir);
+          failures = 0;
+          if (once) onceDone = true;
+          continue;
+        }
+      }
+
       // 抽离 [BOARD] 旁信道：agent 在回复里写一行 JSON 补丁维护共享棋盘，
       // 我们从可见文本里剥掉它，再 apply 到 .task.json。下一棒投喂时就能看到
       // 权威状态，而不是从聊天记录里猜（实测 #333 分叉的根因）。
