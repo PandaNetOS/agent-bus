@@ -1003,6 +1003,27 @@ section('16. 共享棋盘 / 轮次锁 / 回复数封顶');
   fs.rmSync(path.join(TMP, ".turn.json"), { force: true });
 }
 
+// J. 主持场次放宽跳数（否则接龙刚接三个词就断，实测 #464→#466）
+{
+  const G = await import("../lib/gates.mjs");
+  const msg = { seq: 60, from: "pi", to: "prime", thread: "t-40", mentions: "", hop: 10, via: "driver:pi" };
+  const g = G.gate(msg, {
+    me: "prime", all: [msg], consumed: new Set(),
+    config: { groupChat: true, activeThread: "t-40", maxHop: 3, floorMaxHop: 40 },
+  });
+  ok("GATES：主持场次跳数放宽到 floorMaxHop", g.ok, g.reason || "");
+  const g2 = G.gate(msg, {
+    me: "prime", all: [msg], consumed: new Set(),
+    config: { groupChat: true, maxHop: 3 },
+  });
+  ok("GATES：普通群聊仍按 maxHop 到顶", !g2.ok && g2.reason === "hop-limit", g2.reason || "");
+  const g3 = G.gate(msg, {
+    me: "prime", all: [msg], consumed: new Set(),
+    config: { groupChat: true, activeThread: "t-40", maxHop: 3, floorMaxHop: 8 },
+  });
+  ok("GATES：主持场次也受 floorMaxHop 封顶", !g3.ok && g3.reason === "hop-limit", g3.reason || "");
+}
+
 
 
 console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====`);

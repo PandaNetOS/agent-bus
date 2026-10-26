@@ -284,7 +284,9 @@ driver 把 `[BOARD] {...}` 解析出来、apply 到 `.task.json`，**从可见�
 
 1. `to == 我` 或 `mentions` 含我（`to == '*'` 的群聊广播对所有人成立）
 2. `from != 我`
-3. `via == human` 或 `hop < maxHop`（默认 3）
+3. `via == human` 或 `hop < maxHop`（默认 3）。**主持场次（`activeThread`）改用
+   `floorMaxHop`（默认 40）** —— 那一场的秩序由主持人 + 轮次锁 + 租约保证，
+   接龙本来就该走几十跳；3 跳会让游戏刚接三个词就断（实测 `#464→#466`）。
 4. 该 seq 不在本 driver 游标里
 5. 未熔断（60 秒内自动消息 ≤ 12 条）
 6. **未过期**：消息发出后 `maxAgeMs`（默认 5 分钟，可在 `hub-config.json` 调）内没人接，就不再自动投喂
