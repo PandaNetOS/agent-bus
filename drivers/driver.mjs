@@ -472,16 +472,21 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
         // thread 里的自动回话一律不许再投喂（gates.mjs 的 thread-stopped
         // 闸），否则 floor 清掉后旧链还能被在途 agent 接着接（实测 #530 起）。
         const stoppedThread = `t-${floor.seq}`;
+        // 人的「停」这条消息本身通常是广播、没 thread，agent 的回应会落进
+        // t-${msg.seq} 这个新 thread——不封它，agent 就会在「停」下面互相
+        // 辩论谁记对了链（实测 #664/#665）。所以连同停令自己的 thread 一起封。
+        const stopThread = `t-${msg.seq}`;
         const cfg2 = readConfig();
         const cur = Array.isArray(cfg2.stoppedThreads) ? cfg2.stoppedThreads : [];
-        if (!cur.includes(stoppedThread)) {
-          writeConfig({ stoppedThreads: [...cur, stoppedThread] });
+        const add = [stoppedThread, stopThread].filter((t) => !cur.includes(t));
+        if (add.length) {
+          writeConfig({ stoppedThreads: [...cur, ...add] });
         }
         clearFloor(ROOT);
         clearTurn(ROOT);
         clearBoard(ROOT);
         floor = null;
-        log(name, `#${msg.seq} 人喊停，结束整局（floor/turn/board 已清，thread ${stoppedThread} 封停）`);
+        log(name, `#${msg.seq} 人喊停，结束整局（floor/turn/board 已清，thread ${stoppedThread}+${stopThread} 封停）`);
       } else {
         log(name, `#${msg.seq} 人喊停，但当前没有进行中的局`);
       }

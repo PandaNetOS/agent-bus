@@ -1065,6 +1065,11 @@ section('16. 共享棋盘 / 轮次锁 / 回复数封顶');
   // 人的消息不受这条闸限制（人可点名/新开）
   const gH = G.gate(humanStop, { me: "hermes", all: [humanStop], consumed: new Set(), config: cfg() });
   ok("GATES：人喊停后仍能在同 thread 点名（人的消息不受封）", gH.ok, gH.reason || "");
+  // agent 之间在停过的 thread 里互怼（回复别人的「停」）也要封，否则停在
+  // 「停」下面还会继续辩论（实测 #664/#665）
+  const ackOfAck = { seq: 664, from: "hermes", to: "opencode", thread: "t-520", mentions: "opencode", hop: 2, reply_to: 580, via: "driver:hermes" };
+  const gAA = G.gate(ackOfAck, { me: "opencode", all: [humanStop, ack, ackOfAck], consumed: new Set(), config: cfg() });
+  ok("GATES：停过的 thread 里 agent 互怼也被封", !gAA.ok && gAA.reason === "thread-stopped", gAA.reason || "");
   // 没停的 thread 不受影响
   const gLive = G.gate(agentReply, { me: "hermes", all: [agentReply], consumed: new Set(), config: { groupChat: true, activeThread: "t-520", floorMaxHop: 40 } });
   ok("GATES：没停的 thread 照常可接", gLive.ok, gLive.reason || "");
