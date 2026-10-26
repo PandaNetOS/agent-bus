@@ -889,6 +889,11 @@ section('16. 共享棋盘 / 轮次锁 / 回复数封顶');
   // seq 不被补丁覆盖
   b = T.applyPatch(b, { seq: 999 });
   ok("BOARD：seq 不受补丁覆盖", b.seq === undefined || b.seq !== 999);
+  // 完整链条不重复：agent 发全量时应该替换而不是 concat 成两遍
+  const full = T.applyPatch({ chain: ["一心一意", "强词夺理"] }, { chain: ["一心一意", "强词夺理", "理直气壮"] });
+  ok("BOARD：完整链条去重", full.chain.length === 3 && full.chain[2] === "理直气壮");
+  const inc = T.applyPatch({ chain: ["一心一意"] }, { chain: ["强词夺理"] });
+  ok("BOARD：增量链条累积", inc.chain.length === 2);
 }
 
 // C. boardBrief 给出权威状态
@@ -906,6 +911,19 @@ section('16. 共享棋盘 / 轮次锁 / 回复数封顶');
   ok("TURN：显式 @ 在最前", order[0] === "opencode");
   ok("TURN：ceo 在 @ 之后、其余之前", order.indexOf("dsh") === 1);
   ok("TURN：其余按名字序", order.slice(2).join(",") === "hermes,pi,prime");
+}
+
+// D2. 主持人自己定的顺序优先（实测 #456 主持人写了「我→hermes→pi→prime→opencode」）
+{
+  const U = await import("../lib/turn.mjs");
+  const members = ["dsh", "hermes", "opencode", "pi", "prime"];
+  const stated = U.parseOrder("顺序是 我→hermes→pi→prime→opencode→我", { leader: "dsh", members });
+  ok("TURN：解析主持人自定顺序", Array.isArray(stated) && stated.join(",") === "dsh,hermes,pi,prime,opencode",
+    `实际 ${JSON.stringify(stated)}`);
+  const t = U.initTurn(TMP, { seq: 500, leader: "dsh", ceo: "dsh", members, order: stated });
+  ok("TURN：initTurn 采用主持人自定顺序", t.order.join(",") === "dsh,hermes,pi,prime,opencode");
+  ok("TURN：解析不出顺序时返回 null", U.parseOrder("大家随便聊", { leader: "dsh", members }) === null);
+  fs.rmSync(path.join(TMP, ".turn.json"), { force: true });
 }
 
 // E. 主持人开场后 initTurn 把主持人放队首

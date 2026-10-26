@@ -6,6 +6,12 @@ room.jsonl
 ceo.txt
 hub-config.json
 
+# 主持 / 轮次 / 共享棋盘（运行时状态，不进仓库）
+.floor.json
+.floor.lock
+.turn.json
+.task.json
+
 # driver 运行状态
 .cursor-*.json
 .heartbeat-*.json

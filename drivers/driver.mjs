@@ -20,7 +20,7 @@ import {
   extractBoard, readBoard, writeBoard, clearBoard, applyPatch, boardBrief,
 } from '../lib/task.mjs';
 import {
-  initTurn, readTurn, advanceTurn, acquireTurn, currentTurn, clearTurn, turnBrief,
+  initTurn, readTurn, advanceTurn, acquireTurn, currentTurn, clearTurn, parseOrder, turnBrief,
 } from '../lib/turn.mjs';
 
 /** driver 进程内已抢到（或已知被别人抢走）的广播 seq */
@@ -619,8 +619,11 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
         // 初始化轮次，让后续接话者按确定性顺序来。
         // 主持人刚说完开场，轮次立即推进到下一位，cursor 指向开场那条 ——
         // 下一位要接的就是它（否则 idx 停在主持人，后面永远轮不到）。
+        // 主持人若在开场里自己定了顺序（「顺序是 我→hermes→pi→…」），照它的来
+        const statedOrder = parseOrder(cleanText, { leader: name, members: AGENT_NAMES });
         initTurn(ROOT, {
-          seq: msg.seq, leader: name, ceo: readCeo(), members: AGENT_NAMES, cursorSeq: out.seq,
+          seq: msg.seq, leader: name, ceo: readCeo(), members: AGENT_NAMES,
+          cursorSeq: out.seq, order: statedOrder,
         });
         advanceTurn(ROOT, { seq: msg.seq, me: name, nextSeq: out.seq });
       }
