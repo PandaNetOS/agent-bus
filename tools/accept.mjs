@@ -866,6 +866,29 @@ section('15. 谁起头谁主持：定规则 + 维护秩序');
   fs.rmSync(path.join(TMP, ".floor.lock"), { force: true });
 }
 
+// ---------------- 15b. 人一句话结束整局 ----------------
+section('15b. 人一句话结束整局（detectStop / 停 floor）');
+
+{
+  const F = await import("../lib/floor.mjs");
+  ok("STOP：纯「先停一下」命中", F.detectStop("先停一下"));
+  ok("STOP：不玩了命中", F.detectStop("不玩了"));
+  ok("STOP：收手命中", F.detectStop("收手"));
+  ok("STOP：结束这局命中", F.detectStop("结束这局"));
+  ok("STOP：到此为止命中", F.detectStop("到此为止"));
+  ok("STOP：闲聊里的「停」不误判", F.detectStop("等一下我停个车") === false);
+  ok("STOP：否定「别停」不命中", F.detectStop("别停，继续") === false);
+  ok("STOP：反向「继续玩」不命中", F.detectStop("继续玩") === false);
+  ok("STOP：普通群消息不命中", F.detectStop("今天天气不错") === false);
+
+  // 有局时 detectStop 后 floor 被清
+  fs.rmSync(path.join(TMP, ".floor.json"), { force: true });
+  F.claimFloor(TMP, { seq: 600, me: "dsh", allowed: "dsh" });
+  ok("STOP：清 floor 前有活跃局", !!F.readFloor(TMP));
+  F.clearFloor(TMP);
+  ok("STOP：clearFloor 后无活跃局", !F.readFloor(TMP));
+}
+
 // ---------------- 16. 共享棋盘 + 轮次锁 + 回复数封顶 ----------------
 section('16. 共享棋盘 / 轮次锁 / 回复数封顶');
 
@@ -1022,6 +1045,30 @@ section('16. 共享棋盘 / 轮次锁 / 回复数封顶');
     config: { groupChat: true, activeThread: "t-40", maxHop: 3, floorMaxHop: 8 },
   });
   ok("GATES：主持场次也受 floorMaxHop 封顶", !g3.ok && g3.reason === "hop-limit", g3.reason || "");
+}
+
+// J2. 人一句话结束整局：driver 清 floor/turn/board 且不再接力
+{
+  const F = await import("../lib/floor.mjs");
+  const U = await import("../lib/turn.mjs");
+  const T = await import("../lib/task.mjs");
+  // 造一个进行中的局：floor + turn + board
+  fs.rmSync(path.join(TMP, ".floor.json"), { force: true });
+  fs.rmSync(path.join(TMP, ".turn.json"), { force: true });
+  fs.rmSync(path.join(TMP, ".task.json"), { force: true });
+  F.claimFloor(TMP, { seq: 700, me: "dsh", allowed: "dsh" });
+  U.initTurn(TMP, { seq: 700, leader: "dsh", ceo: "dsh", members: ["dsh","hermes"] });
+  T.writeBoard(TMP, { seq: 700, chain: ["一马当先"], tail: "先" });
+  ok("STOP-DRIVER：造局成功（floor 在）", !!F.readFloor(TMP));
+  ok("STOP-DRIVER：turn 在", !!U.readTurn(TMP));
+  ok("STOP-DRIVER：board 在", !!T.readBoard(TMP));
+  // 直接用底层原语模拟 driver 的清场：人喊停 → 三个都清
+  F.clearFloor(TMP); U.clearTurn(TMP); T.clearBoard(TMP);
+  ok("STOP-DRIVER：清场后 floor 无", !F.readFloor(TMP));
+  ok("STOP-DRIVER：清场后 turn 无", !U.readTurn(TMP));
+  ok("STOP-DRIVER：清场后 board 无", !T.readBoard(TMP));
+  // 并且这一声「停」不会被当成 lead（避免反被起头）
+  ok("STOP-DRIVER：停不会被误判为起头", !F.detectLead("先停一下", { ceo: "dsh", members: ["dsh"] }).lead);
 }
 
 

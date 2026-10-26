@@ -15,7 +15,7 @@ import path from 'node:path';
 import { ROOT, readAll, append, claimReply, readCeo } from '../lib/bus.mjs';
 import { ensureConfig, readConfig, writeConfig } from '../lib/config.mjs';
 import { pending, replyContext, breakerState, gate, names, isBroadcast } from '../lib/gates.mjs';
-import { detectLead, readFloor, claimFloor, setOpening, floorBrief } from '../lib/floor.mjs';
+import { detectLead, readFloor, claimFloor, setOpening, clearFloor, floorBrief, detectStop } from '../lib/floor.mjs';
 import {
   extractBoard, readBoard, writeBoard, clearBoard, applyPatch, boardBrief,
 } from '../lib/task.mjs';
@@ -458,6 +458,23 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
     }
 
     const msg = todo[0];
+
+    // 人一句话结束整局：human 喊「停 / 先停一下 / 不玩了 / 收手 / 结束这局…」
+    // 就清掉 floor + 轮次锁 + 棋盘，所有人立刻收手。必须在 lead 检测之前判，
+    // 否则「结束这局」里的「局/这局」不会触发 lead（没 @、没角色词、没 lead 动词），
+    // 但保险起见放在最前：人喊停优先于任何起头意图。
+    // 只对人生效；agent 之间不能说停（那是想抢话）。
+    if (isHumanMsg(msg) && detectStop(msg.text)) {
+      const hadFloor = !!readFloor(ROOT);
+      clearFloor(ROOT);
+      clearTurn(ROOT);
+      clearBoard(ROOT);
+      cursor.consumed.add(msg.seq);
+      cursor.lastSeq = msg.seq;
+      saveCursor(name, cursor);
+      log(name, `#${msg.seq} 人喊停${hadFloor ? '，结束整局（floor/turn/board 已清）' : '，但当前没有进行中的局'}`);
+      continue;
+    }
 
     // 「这一场谁主持」：human 说「ceo 起头 / 让 X 来」时，先认领。
     // 必须在投喂前做 —— 五个人同时看到广播，先到先得，只有一个能当主持人。
