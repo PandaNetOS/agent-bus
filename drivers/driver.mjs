@@ -468,11 +468,20 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
     // 不会有人再接力；回复数封顶（maxRepliesPerSeq）挡住五个人一起应声。
     if (isHumanMsg(msg) && detectStop(msg.text)) {
       if (floor) {
+        // 把这一场的 thread 记进 config.stoppedThreads：人喊停后，这条
+        // thread 里的自动回话一律不许再投喂（gates.mjs 的 thread-stopped
+        // 闸），否则 floor 清掉后旧链还能被在途 agent 接着接（实测 #530 起）。
+        const stoppedThread = `t-${floor.seq}`;
+        const cfg2 = readConfig();
+        const cur = Array.isArray(cfg2.stoppedThreads) ? cfg2.stoppedThreads : [];
+        if (!cur.includes(stoppedThread)) {
+          writeConfig({ stoppedThreads: [...cur, stoppedThread] });
+        }
         clearFloor(ROOT);
         clearTurn(ROOT);
         clearBoard(ROOT);
         floor = null;
-        log(name, `#${msg.seq} 人喊停，结束整局（floor/turn/board 已清）`);
+        log(name, `#${msg.seq} 人喊停，结束整局（floor/turn/board 已清，thread ${stoppedThread} 封停）`);
       } else {
         log(name, `#${msg.seq} 人喊停，但当前没有进行中的局`);
       }
