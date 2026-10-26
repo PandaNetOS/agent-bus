@@ -460,20 +460,22 @@ export async function runDriver({ name, createSession, intervalMs = 1500, workdi
     const msg = todo[0];
 
     // 人一句话结束整局：human 喊「停 / 先停一下 / 不玩了 / 收手 / 结束这局…」
-    // 就清掉 floor + 轮次锁 + 棋盘，所有人立刻收手。必须在 lead 检测之前判，
-    // 否则「结束这局」里的「局/这局」不会触发 lead（没 @、没角色词、没 lead 动词），
-    // 但保险起见放在最前：人喊停优先于任何起头意图。
+    // 就清掉 floor + 轮次锁 + 棋盘，所有人立刻收手。必须在 lead 检测之前判。
     // 只对人生效；agent 之间不能说停（那是想抢话）。
+    //
+    // 清完不 continue：让这句作为普通群消息被自然回应一句「好，停了」——
+    // 否则人喊停后群里鸦雀无声，像被吞了（这条群聊最忌）。局已经清了，
+    // 不会有人再接力；回复数封顶（maxRepliesPerSeq）挡住五个人一起应声。
     if (isHumanMsg(msg) && detectStop(msg.text)) {
-      const hadFloor = !!readFloor(ROOT);
-      clearFloor(ROOT);
-      clearTurn(ROOT);
-      clearBoard(ROOT);
-      cursor.consumed.add(msg.seq);
-      cursor.lastSeq = msg.seq;
-      saveCursor(name, cursor);
-      log(name, `#${msg.seq} 人喊停${hadFloor ? '，结束整局（floor/turn/board 已清）' : '，但当前没有进行中的局'}`);
-      continue;
+      if (floor) {
+        clearFloor(ROOT);
+        clearTurn(ROOT);
+        clearBoard(ROOT);
+        floor = null;
+        log(name, `#${msg.seq} 人喊停，结束整局（floor/turn/board 已清）`);
+      } else {
+        log(name, `#${msg.seq} 人喊停，但当前没有进行中的局`);
+      }
     }
 
     // 「这一场谁主持」：human 说「ceo 起头 / 让 X 来」时，先认领。
